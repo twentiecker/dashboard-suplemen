@@ -22,7 +22,8 @@ const deleteDataset = (dataset) => {
   chartStore.deleteDataset(dataset);
   isAdded.value = !isAdded.value;
 };
-const isAdded = computed(() => chartStore.selectedDataset);
+// const isAdded = computed(() => chartStore.selectedDataset);
+const isAdded = ref(false);
 </script>
 
 <template>
