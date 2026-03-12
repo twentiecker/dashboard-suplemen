@@ -9,27 +9,178 @@ const props = defineProps({
 
 const chartStore = useChartStore();
 
-const last = computed(() => {
-  const arr = props.datasets.data;
-  return arr[arr.length - 1];
+const FILTER_OPTIONS = {
+  measure: [
+    { label: "Nilai", value: "nilai" },
+    { label: "Pertumbuhan", value: "pertumbuhan" },
+  ],
+  monthlyMethods: [
+    { label: "M to M", value: "mtm" },
+    { label: "Y on Y", value: "yoy" },
+    { label: "Y to Q", value: "ytq" },
+  ],
+  quarterlyMethods: [
+    { label: "Q to Q", value: "qtq" },
+    { label: "Y on Y", value: "yoy" },
+    { label: "C to C", value: "ctc" },
+  ],
+};
+
+const config = computed(() => chartStore.getCompareConfig(props.datasets));
+
+const monthlyToQuarterly = (monthly) => {
+  return [
+    monthly[2],
+    monthly[5],
+    monthly[8],
+    monthly[11],
+    monthly[14],
+    monthly[17],
+    monthly[20],
+    monthly[23],
+  ];
+};
+
+const quarterlyToMonthly = (quarterly) => {
+  const out = new Array(24).fill(null);
+  const indexes = [2, 5, 8, 11, 14, 17, 20, 23];
+  indexes.forEach((idx, i) => {
+    out[idx] = quarterly[i] ?? null;
+  });
+  return out;
+};
+
+const sumSafe = (arr) => arr.reduce((a, b) => a + Number(b ?? 0), 0);
+
+const growthPercent = (current, previous) => {
+  if (
+    current === null ||
+    current === undefined ||
+    previous === null ||
+    previous === undefined ||
+    Number(previous) === 0
+  ) {
+    return null;
+  }
+  return Number((((current - previous) / previous) * 100).toFixed(2));
+};
+
+const computeMonthlyGrowth = (values, method) => {
+  return values.map((val, i) => {
+    if (val === null || val === undefined) return null;
+
+    if (method === "mtm") return growthPercent(val, values[i - 1]);
+    if (method === "yoy") return growthPercent(val, values[i - 12]);
+
+    if (method === "ytq") {
+      if (i < 12) return null;
+
+      const posInQuarter = i % 3;
+      const quarterStart = i - posInQuarter;
+      const prevYearQuarterStart = quarterStart - 12;
+
+      if (prevYearQuarterStart < 0) return null;
+
+      const currentCum = sumSafe(values.slice(quarterStart, i + 1));
+      const prevCum = sumSafe(
+        values.slice(prevYearQuarterStart, prevYearQuarterStart + posInQuarter + 1)
+      );
+
+      return growthPercent(currentCum, prevCum);
+    }
+
+    return null;
+  });
+};
+
+const computeQuarterlyGrowth = (values, method) => {
+  return values.map((val, i) => {
+    if (val === null || val === undefined) return null;
+
+    if (method === "qtq") return growthPercent(val, values[i - 1]);
+    if (method === "yoy") return growthPercent(val, values[i - 4]);
+
+    if (method === "ctc") {
+      if (i < 4) return null;
+
+      const quarterPos = i % 4;
+      const currentYearStart = i - quarterPos;
+      const prevYearStart = currentYearStart - 4;
+
+      if (prevYearStart < 0) return null;
+
+      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
+      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + quarterPos + 1));
+
+      return growthPercent(currentCum, prevCum);
+    }
+
+    return null;
+  });
+};
+
+const getBaseSeries = (dataset, aggregation) => {
+  if (aggregation === "monthly") {
+    if (dataset.rawFrequency === "quarterly") {
+      return quarterlyToMonthly(dataset.series.quarterly);
+    }
+    return dataset.series.monthly;
+  }
+
+  if (dataset.rawFrequency === "quarterly") return dataset.series.quarterly;
+  return dataset.series.quarterly ?? monthlyToQuarterly(dataset.series.monthly);
+};
+
+const preparedSeries = computed(() => {
+  const measure = config.value?.measure ?? "nilai";
+
+  const fallbackAggregation =
+    props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly";
+
+  const aggregation = config.value?.aggregation ?? fallbackAggregation;
+  const method = config.value?.method ?? (aggregation === "monthly" ? "mtm" : "qtq");
+
+  const baseSeries = getBaseSeries(props.datasets, aggregation);
+
+  if (measure === "nilai") return baseSeries;
+
+  if (aggregation === "monthly") return computeMonthlyGrowth(baseSeries, method);
+  return computeQuarterlyGrowth(baseSeries, method);
 });
 
-const prev = computed(() => {
-  const arr = props.datasets.data;
-  return arr[arr.length - 2];
-});
+const getLastNonNull = (arr) => {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] !== null && arr[i] !== undefined) return arr[i];
+  }
+  return null;
+};
 
-const isUp = computed(() => (last.value ?? 0) - (prev.value ?? 0) >= 0);
+const getPrevNonNull = (arr) => {
+  let found = 0;
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] !== null && arr[i] !== undefined) {
+      found++;
+      if (found === 2) return arr[i];
+    }
+  }
+  return null;
+};
 
-const growthPct = computed(() => {
-  const l = Number(last.value ?? 0);
-  const p = Number(prev.value ?? 0);
-  if (!p) return 0;
-  return ((l - p) / p) * 100;
+const last = computed(() => getLastNonNull(preparedSeries.value));
+const prev = computed(() => getPrevNonNull(preparedSeries.value));
+
+const isUp = computed(() => (Number(last.value ?? 0) - Number(prev.value ?? 0)) >= 0);
+
+const displayValue = computed(() => {
+  if (last.value === null || last.value === undefined) return "-";
+  return Number(last.value).toFixed(2);
 });
 
 const growthText = computed(() => {
-  const v = growthPct.value;
+  const l = Number(last.value ?? 0);
+  const p = Number(prev.value ?? 0);
+  if (!p) return "0.00%";
+  const v = ((l - p) / p) * 100;
   const sign = v > 0 ? "+" : "";
   return `${sign}${v.toFixed(2)}%`;
 });
@@ -37,93 +188,223 @@ const growthText = computed(() => {
 const isSelected = computed(() => chartStore.isSelected(props.datasets.id));
 const isPrimary = computed(() => chartStore.primaryId === props.datasets.id);
 const isDisabled = computed(() => chartStore.isLocked && !isSelected.value);
+const isExpanded = computed(() => chartStore.isExpanded(props.datasets.id));
+
+const canChooseMonthly = computed(() => props.datasets.rawFrequency === "monthly");
+
+const showAggregationFilter = computed(() => !!config.value.measure);
+const showMethodFilter = computed(() => !!config.value.measure && !!config.value.aggregation);
 
 const onClickCard = () => {
   if (isDisabled.value) return;
 
-  const selectedCount = chartStore.selectedDataset?.length ?? 0;
-  if (selectedCount > 1 && !isSelected.value) {
-    const viewOnly = window.confirm(
-      "Kamu sudah memilih lebih dari 1 chart.\n\nOK: lihat chart ini saja (mengganti pilihan)\nCancel: tambahkan chart ini"
-    );
-
-    if (viewOnly) {
-      chartStore.setPrimary(props.datasets); 
-    } else {
-      chartStore.addCompare(props.datasets); 
-    }
-    return;
+  if (chartStore.selectedDataset.length > 1) {
+    const confirmChange = window.confirm("Apakah ingin melihat chart ini saja?");
+    if (!confirmChange) return;
   }
 
-  // default behavior (tetap)
   chartStore.setPrimary(props.datasets);
 };
 
 const onToggleCompare = () => {
-  if (isSelected.value) chartStore.removeSelected(props.datasets);
-  else chartStore.addCompare(props.datasets);
+  if (isDisabled.value) return;
+  chartStore.toggleCompare(props.datasets);
+};
+
+const onMeasureChange = (e) => {
+  chartStore.setMeasure(props.datasets.id, e.target.value, props.datasets);
+};
+
+const onAggregationChange = (e) => {
+  chartStore.setAggregation(props.datasets.id, e.target.value, props.datasets);
+};
+
+const onMethodChange = (e) => {
+  chartStore.setMethod(props.datasets.id, e.target.value, props.datasets);
 };
 </script>
 
 <template>
   <div
-    class="w-full px-3 py-2 cursor-pointer select-none"
+    class="w-full py-2 pl-3 pr-2 cursor-pointer select-none rounded-r-xl transition-all duration-200"
     :class="[
-      isPrimary ? 'border-l-3 border-blue-500' : '',
+      isPrimary ? 'border-l-[3px] border-blue-500' : 'border-l-[3px] border-transparent',
+      isSelected ? 'card-selected' : 'card-hover',
       isDisabled ? 'opacity-40 cursor-not-allowed' : ''
     ]"
     @click="onClickCard"
   >
     <div
-      class="grid items-center w-full gap-x-3 min-w-0"
-      style="
-        grid-template-columns:
-          minmax(50px, 10px)
-          1fr
-          minmax(40px, 10px)
-          32px;
-      "
+      class="grid items-center min-w-0"
+      style="grid-template-columns: minmax(0,1fr) 56px 60px 26px; column-gap:4px;"
     >
-      <!-- KIRI -->
       <div class="min-w-0">
-        <h1 class="text-sm font-semibold truncate" :title="datasets.indicatorName">
+        <h1
+          class="truncate text-[14px] font-semibold theme-text"
+          :title="datasets.indicatorName"
+        >
           {{ datasets.indicatorName }}
         </h1>
 
-        <p class="text-xs opacity-70 truncate">
+        <p class="truncate text-[14px] font-semibold theme-text mt-[2px]">
           {{ datasets.groupCode }}
         </p>
       </div>
 
-      <!-- SPARKLINE -->
-      <div class="min-w-0 w-full">
-        <div class="h-12 w-full">
-          <LineChartComponent :datasets="datasets" class="w-full h-full" />
+      <div class="w-[56px]">
+        <div class="h-11 w-full">
+          <LineChartComponent
+            :datasets="datasets"
+            class="w-full h-full"
+          />
         </div>
       </div>
 
-      <!-- VALUE -->
-      <div class="text-right min-w-0">
-        <h1 class="text-sm font-semibold" :class="isUp ? 'text-green-500' : 'text-red-500'">
-          {{ Number(last).toFixed(1) }}
+      <div class="w-[60px] text-right">
+        <h1 class="text-[14px] font-semibold leading-tight theme-text">
+          {{ displayValue }}
         </h1>
-        <p class="text-xs opacity-80" :class="isUp ? 'text-green-500' : 'text-red-500'">
+
+        <p
+          class="text-[14px] font-semibold leading-tight"
+          :class="isUp ? 'text-green-500' : 'text-red-500'"
+        >
           {{ growthText }}
         </p>
       </div>
 
-      <!-- ICON -->
       <button
-        class="w-10 h-10 grid place-items-center rounded-full overflow-visible"
-        :class="(isDisabled && !isSelected) ? 'pointer-events-none' : ''"
+        class="w-[26px] h-[26px] grid place-items-center"
         @click.stop="onToggleCompare"
         type="button"
       >
         <i
-          class="text-2xl leading-none"
-          :class="isSelected ? 'pi pi-minus-circle hover:text-red-500' : 'pi pi-plus-circle hover:text-blue-500'"
+          class="text-[18px] theme-text transition-colors duration-200"
+          :class="isSelected
+            ? 'pi pi-minus-circle text-blue-400 hover:text-red-500'
+            : 'pi pi-plus-circle hover:text-blue-500'"
         />
       </button>
     </div>
+
+    <div
+      v-if="isSelected && isExpanded"
+      class="mt-3 rounded-lg p-3 theme-filter-panel"
+      @click.stop
+    >
+      <div>
+        <label class="block text-[12px] mb-1 theme-text-muted">Pilih Tampilan</label>
+        <select
+          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+          :value="config.measure ?? ''"
+          @change="onMeasureChange"
+        >
+          <option value="" disabled>Pilih tampilan</option>
+          <option
+            v-for="opt in FILTER_OPTIONS.measure"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+
+      <div v-if="showAggregationFilter" class="mt-3">
+        <label class="block text-[12px] mb-1 theme-text-muted">Pilih Frekuensi</label>
+        <select
+          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+          :value="config.aggregation ?? ''"
+          @change="onAggregationChange"
+        >
+          <option value="" disabled>Pilih frekuensi</option>
+          <option value="monthly" :disabled="!canChooseMonthly">Bulanan</option>
+          <option value="quarterly">Triwulanan</option>
+        </select>
+
+        <p v-if="!canChooseMonthly" class="text-[11px] mt-1 theme-text-muted">
+          Data triwulanan hanya bisa memilih filter triwulanan.
+        </p>
+      </div>
+
+      <div v-if="showMethodFilter && config.aggregation === 'monthly'" class="mt-3">
+        <label class="block text-[12px] mb-1 theme-text-muted">Metode Bulanan</label>
+        <select
+          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+          :value="config.method ?? ''"
+          @change="onMethodChange"
+        >
+          <option value="" disabled>Pilih metode</option>
+          <option
+            v-for="opt in FILTER_OPTIONS.monthlyMethods"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+
+      <div v-if="showMethodFilter && config.aggregation === 'quarterly'" class="mt-3">
+        <label class="block text-[12px] mb-1 theme-text-muted">Metode Triwulanan</label>
+        <select
+          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+          :value="config.method ?? ''"
+          @change="onMethodChange"
+        >
+          <option value="" disabled>Pilih metode</option>
+          <option
+            v-for="opt in FILTER_OPTIONS.quarterlyMethods"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+    </div>
   </div>
 </template>
+
+<style scoped>
+.theme-text {
+  color: var(--p-text-color);
+}
+
+.theme-text-muted {
+  color: var(--p-text-muted-color);
+}
+
+.theme-filter-panel {
+  border: 1px solid var(--p-content-border-color);
+  background: var(--p-content-background);
+}
+
+.theme-select {
+  color: var(--p-text-color);
+  background: var(--p-content-background);
+  border: 1px solid var(--p-content-border-color);
+  outline: none;
+}
+
+.theme-select:focus {
+  border-color: var(--p-primary-500);
+  box-shadow: 0 0 0 1px var(--p-primary-500);
+}
+
+.theme-select option {
+  color: var(--p-text-color);
+  background: var(--p-content-background);
+}
+
+/* hover default */
+.card-hover:hover {
+  background: color-mix(in srgb, var(--p-primary-500) 10%, transparent);
+}
+
+/* card terpilih */
+.card-selected {
+  background: color-mix(in srgb, var(--p-primary-500) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--p-primary-500) 45%, transparent);
+}
+</style>
