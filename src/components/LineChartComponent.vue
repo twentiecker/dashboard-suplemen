@@ -10,27 +10,43 @@ const chartStore = useChartStore();
 
 const config = computed(() => chartStore.getCompareConfig(props.datasets));
 
-const monthlyToQuarterly = (monthly) => {
-  return [
-    monthly[2],
-    monthly[5],
-    monthly[8],
-    monthly[11],
-    monthly[14],
-    monthly[17],
-    monthly[20],
-    monthly[23],
-  ].map((v) => Number(v?.toFixed?.(2) ?? v));
+const parsePeriod = (period) => {
+  const text = String(period ?? "").trim().toUpperCase();
+
+  let m = text.match(/^(\d{4})M(\d{1,2})$/);
+  if (m) {
+    return {
+      type: "monthly",
+      year: Number(m[1]),
+      month: Number(m[2]),
+    };
+  }
+
+  m = text.match(/^(\d{4})Q([1-4])$/);
+  if (m) {
+    return {
+      type: "quarterly",
+      year: Number(m[1]),
+      quarter: Number(m[2]),
+      month: Number(m[2]) * 3,
+    };
+  }
+
+  return { type: "unknown" };
 };
 
-const quarterlyToMonthly = (quarterly) => {
-  const out = new Array(24).fill(null);
-  const indexes = [2, 5, 8, 11, 14, 17, 20, 23];
+const isQuarterEndPeriod = (period) => {
+  const p = parsePeriod(period);
+  return p.type === "monthly" && [3, 6, 9, 12].includes(p.month);
+};
 
-  indexes.forEach((idx, i) => {
-    out[idx] = quarterly[i] ?? null;
+const monthlyToQuarterlyByPeriods = (monthly = [], periods = []) => {
+  const out = [];
+  periods.forEach((period, index) => {
+    if (isQuarterEndPeriod(period)) {
+      out.push(monthly[index] ?? null);
+    }
   });
-
   return out;
 };
 
@@ -62,19 +78,17 @@ const computeMonthlyGrowth = (values, method) => {
       return growthPercent(val, values[i - 12]);
     }
 
-    if (method === "ytq") {
+    if (method === "ytd") {
       if (i < 12) return null;
 
-      const posInQuarter = i % 3;
-      const quarterStart = i - posInQuarter;
-      const prevYearQuarterStart = quarterStart - 12;
+      const monthInYear = i % 12;
+      const currentYearStart = i - monthInYear;
+      const prevYearStart = currentYearStart - 12;
 
-      if (prevYearQuarterStart < 0) return null;
+      if (prevYearStart < 0) return null;
 
-      const currentCum = sumSafe(values.slice(quarterStart, i + 1));
-      const prevCum = sumSafe(
-        values.slice(prevYearQuarterStart, prevYearQuarterStart + posInQuarter + 1)
-      );
+      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
+      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + monthInYear + 1));
 
       return growthPercent(currentCum, prevCum);
     }
@@ -116,14 +130,12 @@ const computeQuarterlyGrowth = (values, method) => {
 
 const getBaseSeries = (dataset, aggregation) => {
   if (aggregation === "monthly") {
-    if (dataset.rawFrequency === "quarterly") {
-      return quarterlyToMonthly(dataset.series.quarterly);
-    }
-    return dataset.series.monthly;
+    return dataset.series.monthly ?? [];
   }
 
-  if (dataset.rawFrequency === "quarterly") return dataset.series.quarterly;
-  return dataset.series.quarterly ?? monthlyToQuarterly(dataset.series.monthly);
+  if (dataset.rawFrequency === "quarterly") return dataset.series.quarterly ?? [];
+
+  return monthlyToQuarterlyByPeriods(dataset.series.monthly ?? [], dataset.periods ?? []);
 };
 
 const preparedSeries = computed(() => {
