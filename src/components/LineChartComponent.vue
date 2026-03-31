@@ -50,84 +50,6 @@ const monthlyToQuarterlyByPeriods = (monthly = [], periods = []) => {
   return out;
 };
 
-const sumSafe = (arr) => arr.reduce((a, b) => a + Number(b ?? 0), 0);
-
-const growthPercent = (current, previous) => {
-  if (
-    current === null ||
-    current === undefined ||
-    previous === null ||
-    previous === undefined ||
-    Number(previous) === 0
-  ) {
-    return null;
-  }
-
-  return Number((((current - previous) / previous) * 100).toFixed(2));
-};
-
-const computeMonthlyGrowth = (values, method) => {
-  return values.map((val, i) => {
-    if (val === null || val === undefined) return null;
-
-    if (method === "mtm") {
-      return growthPercent(val, values[i - 1]);
-    }
-
-    if (method === "yoy") {
-      return growthPercent(val, values[i - 12]);
-    }
-
-    if (method === "ytd") {
-      if (i < 12) return null;
-
-      const monthInYear = i % 12;
-      const currentYearStart = i - monthInYear;
-      const prevYearStart = currentYearStart - 12;
-
-      if (prevYearStart < 0) return null;
-
-      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
-      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + monthInYear + 1));
-
-      return growthPercent(currentCum, prevCum);
-    }
-
-    return null;
-  });
-};
-
-const computeQuarterlyGrowth = (values, method) => {
-  return values.map((val, i) => {
-    if (val === null || val === undefined) return null;
-
-    if (method === "qtq") {
-      return growthPercent(val, values[i - 1]);
-    }
-
-    if (method === "yoy") {
-      return growthPercent(val, values[i - 4]);
-    }
-
-    if (method === "ctc") {
-      if (i < 4) return null;
-
-      const quarterPos = i % 4;
-      const currentYearStart = i - quarterPos;
-      const prevYearStart = currentYearStart - 4;
-
-      if (prevYearStart < 0) return null;
-
-      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
-      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + quarterPos + 1));
-
-      return growthPercent(currentCum, prevCum);
-    }
-
-    return null;
-  });
-};
-
 const getBaseSeries = (dataset, aggregation) => {
   if (aggregation === "monthly") {
     return dataset.series.monthly ?? [];
@@ -138,6 +60,15 @@ const getBaseSeries = (dataset, aggregation) => {
   return monthlyToQuarterlyByPeriods(dataset.series.monthly ?? [], dataset.periods ?? []);
 };
 
+const getGrowthSeries = (dataset, aggregation, method) => {
+  const payload = dataset?.growth?.[aggregation]?.[method];
+
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.data)) return payload.data;
+
+  return [];
+};
+
 const preparedSeries = computed(() => {
   const measure = config.value?.measure ?? "nilai";
   const aggregation =
@@ -145,15 +76,8 @@ const preparedSeries = computed(() => {
     (props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly");
   const method = config.value?.method ?? (aggregation === "monthly" ? "mtm" : "qtq");
 
-  const baseSeries = getBaseSeries(props.datasets, aggregation);
-
-  if (measure === "nilai") return baseSeries;
-
-  if (aggregation === "monthly") {
-    return computeMonthlyGrowth(baseSeries, method);
-  }
-
-  return computeQuarterlyGrowth(baseSeries, method);
+  if (measure === "nilai") return getBaseSeries(props.datasets, aggregation);
+  return getGrowthSeries(props.datasets, aggregation, method);
 });
 
 const getLastNonNull = (arr) => {

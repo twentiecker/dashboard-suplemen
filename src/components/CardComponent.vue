@@ -68,73 +68,6 @@ const monthlyToQuarterlyByPeriods = (monthly = [], periods = []) => {
   return out;
 };
 
-const sumSafe = (arr) => arr.reduce((a, b) => a + Number(b ?? 0), 0);
-
-const growthPercent = (current, previous) => {
-  if (
-    current === null ||
-    current === undefined ||
-    previous === null ||
-    previous === undefined ||
-    Number(previous) === 0
-  ) {
-    return null;
-  }
-  return Number((((current - previous) / previous) * 100).toFixed(2));
-};
-
-const computeMonthlyGrowth = (values, method) => {
-  return values.map((val, i) => {
-    if (val === null || val === undefined) return null;
-
-    if (method === "mtm") return growthPercent(val, values[i - 1]);
-    if (method === "yoy") return growthPercent(val, values[i - 12]);
-
-    if (method === "ytd") {
-      if (i < 12) return null;
-
-      const monthInYear = i % 12;
-      const currentYearStart = i - monthInYear;
-      const prevYearStart = currentYearStart - 12;
-
-      if (prevYearStart < 0) return null;
-
-      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
-      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + monthInYear + 1));
-
-      return growthPercent(currentCum, prevCum);
-    }
-
-    return null;
-  });
-};
-
-const computeQuarterlyGrowth = (values, method) => {
-  return values.map((val, i) => {
-    if (val === null || val === undefined) return null;
-
-    if (method === "qtq") return growthPercent(val, values[i - 1]);
-    if (method === "yoy") return growthPercent(val, values[i - 4]);
-
-    if (method === "ctc") {
-      if (i < 4) return null;
-
-      const quarterPos = i % 4;
-      const currentYearStart = i - quarterPos;
-      const prevYearStart = currentYearStart - 4;
-
-      if (prevYearStart < 0) return null;
-
-      const currentCum = sumSafe(values.slice(currentYearStart, i + 1));
-      const prevCum = sumSafe(values.slice(prevYearStart, prevYearStart + quarterPos + 1));
-
-      return growthPercent(currentCum, prevCum);
-    }
-
-    return null;
-  });
-};
-
 const getBaseSeries = (dataset, aggregation) => {
   if (aggregation === "monthly") {
     return dataset.series.monthly ?? [];
@@ -145,21 +78,24 @@ const getBaseSeries = (dataset, aggregation) => {
   return monthlyToQuarterlyByPeriods(dataset.series.monthly ?? [], dataset.periods ?? []);
 };
 
+const getGrowthSeries = (dataset, aggregation, method) => {
+  const payload = dataset?.growth?.[aggregation]?.[method];
+
+  if (Array.isArray(payload)) return payload;
+  if (payload && Array.isArray(payload.data)) return payload.data;
+
+  return [];
+};
+
 const preparedSeries = computed(() => {
   const measure = config.value?.measure ?? "nilai";
-
   const fallbackAggregation =
     props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly";
-
   const aggregation = config.value?.aggregation ?? fallbackAggregation;
   const method = config.value?.method ?? (aggregation === "monthly" ? "mtm" : "qtq");
 
-  const baseSeries = getBaseSeries(props.datasets, aggregation);
-
-  if (measure === "nilai") return baseSeries;
-
-  if (aggregation === "monthly") return computeMonthlyGrowth(baseSeries, method);
-  return computeQuarterlyGrowth(baseSeries, method);
+  if (measure === "nilai") return getBaseSeries(props.datasets, aggregation);
+  return getGrowthSeries(props.datasets, aggregation, method);
 });
 
 const getLastNonNull = (arr) => {
@@ -207,7 +143,9 @@ const isExpanded = computed(() => chartStore.isExpanded(props.datasets.id));
 const canChooseMonthly = computed(() => props.datasets.rawFrequency === "monthly");
 
 const showAggregationFilter = computed(() => !!config.value.measure);
-const showMethodFilter = computed(() => !!config.value.measure && !!config.value.aggregation);
+const showMethodFilter = computed(
+  () => config.value.measure === "pertumbuhan" && !!config.value.aggregation
+);
 
 const onClickCard = () => {
   if (isDisabled.value) return;
@@ -226,7 +164,17 @@ const onToggleCompare = () => {
 };
 
 const onMeasureChange = (e) => {
-  chartStore.setMeasure(props.datasets.id, e.target.value, props.datasets);
+  const measure = e.target.value;
+  chartStore.setMeasure(props.datasets.id, measure, props.datasets);
+
+  if (measure === "pertumbuhan") {
+    const defaultAggregation =
+      props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly";
+    const defaultMethod = defaultAggregation === "monthly" ? "mtm" : "qtq";
+
+    chartStore.setAggregation(props.datasets.id, defaultAggregation, props.datasets);
+    chartStore.setMethod(props.datasets.id, defaultMethod, props.datasets);
+  }
 };
 
 const onAggregationChange = (e) => {
@@ -253,10 +201,7 @@ const onMethodChange = (e) => {
       style="grid-template-columns: minmax(0,1fr) 56px 60px 26px; column-gap:4px;"
     >
       <div class="min-w-0">
-        <h1
-          class="truncate text-[14px] font-semibold theme-text"
-          :title="datasets.indicatorName"
-        >
+        <h1 class="truncate text-[14px] font-semibold theme-text" :title="datasets.indicatorName">
           {{ datasets.indicatorName }}
         </h1>
 
@@ -267,10 +212,7 @@ const onMethodChange = (e) => {
 
       <div class="w-[56px]">
         <div class="h-11 w-full">
-          <LineChartComponent
-            :datasets="datasets"
-            class="w-full h-full"
-          />
+          <LineChartComponent :datasets="datasets" class="w-full h-full" />
         </div>
       </div>
 
@@ -279,19 +221,12 @@ const onMethodChange = (e) => {
           {{ displayValue }}
         </h1>
 
-        <p
-          class="text-[14px] font-semibold leading-tight"
-          :class="isUp ? 'text-green-500' : 'text-red-500'"
-        >
+        <p class="text-[14px] font-semibold leading-tight" :class="isUp ? 'text-green-500' : 'text-red-500'">
           {{ growthText }}
         </p>
       </div>
 
-      <button
-        class="w-[26px] h-[26px] grid place-items-center"
-        @click.stop="onToggleCompare"
-        type="button"
-      >
+      <button class="w-[26px] h-[26px] grid place-items-center" @click.stop="onToggleCompare" type="button">
         <i
           class="text-[18px] theme-text transition-colors duration-200"
           :class="isSelected
@@ -302,7 +237,7 @@ const onMethodChange = (e) => {
     </div>
 
     <div
-      v-if="isSelected && isExpanded"
+      v-if="isSelected && isExpanded && !isPrimary"
       class="mt-3 rounded-lg p-3 theme-filter-panel"
       @click.stop
     >
@@ -314,11 +249,7 @@ const onMethodChange = (e) => {
           @change="onMeasureChange"
         >
           <option value="" disabled>Pilih tampilan</option>
-          <option
-            v-for="opt in FILTER_OPTIONS.measure"
-            :key="opt.value"
-            :value="opt.value"
-          >
+          <option v-for="opt in FILTER_OPTIONS.measure" :key="opt.value" :value="opt.value">
             {{ opt.label }}
           </option>
         </select>
@@ -349,11 +280,7 @@ const onMethodChange = (e) => {
           @change="onMethodChange"
         >
           <option value="" disabled>Pilih metode</option>
-          <option
-            v-for="opt in FILTER_OPTIONS.monthlyMethods"
-            :key="opt.value"
-            :value="opt.value"
-          >
+          <option v-for="opt in FILTER_OPTIONS.monthlyMethods" :key="opt.value" :value="opt.value">
             {{ opt.label }}
           </option>
         </select>
@@ -367,11 +294,7 @@ const onMethodChange = (e) => {
           @change="onMethodChange"
         >
           <option value="" disabled>Pilih metode</option>
-          <option
-            v-for="opt in FILTER_OPTIONS.quarterlyMethods"
-            :key="opt.value"
-            :value="opt.value"
-          >
+          <option v-for="opt in FILTER_OPTIONS.quarterlyMethods" :key="opt.value" :value="opt.value">
             {{ opt.label }}
           </option>
         </select>
