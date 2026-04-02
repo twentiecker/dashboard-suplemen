@@ -5,6 +5,18 @@ import LineChartComponent from "./LineChartComponent.vue";
 
 const props = defineProps({
   datasets: Object,
+  isGabung: {
+    type: Boolean,
+    default: false,
+  },
+  monthlyDisabled: {
+    type: Boolean,
+    default: false,
+  },
+  quarterlyDisabled: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 const chartStore = useChartStore();
@@ -142,6 +154,17 @@ const isExpanded = computed(() => chartStore.isExpanded(props.datasets.id));
 
 const canChooseMonthly = computed(() => props.datasets.rawFrequency === "monthly");
 
+const isCardMonthlyDisabled = computed(() => {
+  if (!canChooseMonthly.value) return true;
+  if (!props.isGabung) return false;
+  return props.monthlyDisabled;
+});
+
+const isCardQuarterlyDisabled = computed(() => {
+  if (!props.isGabung) return false;
+  return props.quarterlyDisabled;
+});
+
 const showAggregationFilter = computed(() => !!config.value.measure);
 const showMethodFilter = computed(
   () => config.value.measure === "pertumbuhan" && !!config.value.aggregation
@@ -263,8 +286,8 @@ const onMethodChange = (e) => {
           @change="onAggregationChange"
         >
           <option value="" disabled>Pilih frekuensi</option>
-          <option value="monthly" :disabled="!canChooseMonthly">Bulanan</option>
-          <option value="quarterly">Triwulanan</option>
+          <option value="monthly" :disabled="isCardMonthlyDisabled">Bulanan</option>
+          <option value="quarterly" :disabled="isCardQuarterlyDisabled">Triwulanan</option>
         </select>
 
         <p v-if="!canChooseMonthly" class="text-[11px] mt-1 theme-text-muted">
