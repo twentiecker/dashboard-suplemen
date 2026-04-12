@@ -5,18 +5,9 @@ import LineChartComponent from "./LineChartComponent.vue";
 
 const props = defineProps({
   datasets: Object,
-  isGabung: {
-    type: Boolean,
-    default: false,
-  },
-  monthlyDisabled: {
-    type: Boolean,
-    default: false,
-  },
-  quarterlyDisabled: {
-    type: Boolean,
-    default: false,
-  },
+  isGabung: { type: Boolean, default: false },
+  monthlyDisabled: { type: Boolean, default: false },
+  quarterlyDisabled: { type: Boolean, default: false },
 });
 
 const chartStore = useChartStore();
@@ -26,89 +17,58 @@ const FILTER_OPTIONS = {
     { label: "Nilai", value: "nilai" },
     { label: "Pertumbuhan", value: "pertumbuhan" },
   ],
+  period: [
+    { label: "Bulanan", value: "monthly" },
+    { label: "Triwulanan", value: "quarterly" },
+    { label: "Tahunan", value: "yearly" },
+  ],
   monthlyMethods: [
-    { label: "M to M", value: "mtm" },
-    { label: "Y on Y", value: "yoy" },
-    { label: "Y to D", value: "ytd" },
+    { label: "M to M", value: "mtom" },
+    { label: "Y on Y", value: "yony" },
+    { label: "Y to D", value: "ytod" },
   ],
   quarterlyMethods: [
-    { label: "Q to Q", value: "qtq" },
-    { label: "Y on Y", value: "yoy" },
-    { label: "C to C", value: "ctc" },
+    { label: "Q to Q", value: "qtoq" },
+    { label: "Y on Y", value: "yony" },
+    { label: "C to C", value: "ctoc" },
   ],
 };
 
 const config = computed(() => chartStore.getCompareConfig(props.datasets));
 
-const parsePeriod = (period) => {
-  const text = String(period ?? "").trim().toUpperCase();
+const getSeriesByConfig = (dataset, cfg) => {
+  const measure = cfg?.measure ?? "nilai";
+  const aggregation =
+    cfg?.aggregation ??
+    (dataset.rawFrequency === "monthly"
+      ? "monthly"
+      : dataset.rawFrequency === "quarterly"
+        ? "quarterly"
+        : "yearly");
 
-  let m = text.match(/^(\d{4})M(\d{1,2})$/);
-  if (m) {
+  const method =
+    cfg?.method ??
+    (aggregation === "monthly"
+      ? "mtom"
+      : aggregation === "quarterly"
+        ? "qtoq"
+        : "annual");
+
+  if (measure === "nilai") {
     return {
-      type: "monthly",
-      year: Number(m[1]),
-      month: Number(m[2]),
+      data: dataset?.series?.[aggregation] ?? [],
+      periods: dataset?.derivedPeriods?.[aggregation] ?? [],
     };
   }
 
-  m = text.match(/^(\d{4})Q([1-4])$/);
-  if (m) {
-    return {
-      type: "quarterly",
-      year: Number(m[1]),
-      quarter: Number(m[2]),
-      month: Number(m[2]) * 3,
-    };
+  if (aggregation === "yearly") {
+    return dataset?.growth?.yearly ?? { data: [], periods: [] };
   }
 
-  return { type: "unknown" };
+  return dataset?.growth?.[aggregation]?.[method] ?? { data: [], periods: [] };
 };
 
-const isQuarterEndPeriod = (period) => {
-  const p = parsePeriod(period);
-  return p.type === "monthly" && [3, 6, 9, 12].includes(p.month);
-};
-
-const monthlyToQuarterlyByPeriods = (monthly = [], periods = []) => {
-  const out = [];
-  periods.forEach((period, index) => {
-    if (isQuarterEndPeriod(period)) {
-      out.push(monthly[index] ?? null);
-    }
-  });
-  return out;
-};
-
-const getBaseSeries = (dataset, aggregation) => {
-  if (aggregation === "monthly") {
-    return dataset.series.monthly ?? [];
-  }
-
-  if (dataset.rawFrequency === "quarterly") return dataset.series.quarterly ?? [];
-
-  return monthlyToQuarterlyByPeriods(dataset.series.monthly ?? [], dataset.periods ?? []);
-};
-
-const getGrowthSeries = (dataset, aggregation, method) => {
-  const payload = dataset?.growth?.[aggregation]?.[method];
-
-  if (Array.isArray(payload)) return payload;
-  if (payload && Array.isArray(payload.data)) return payload.data;
-
-  return [];
-};
-
-const preparedSeries = computed(() => {
-  const measure = config.value?.measure ?? "nilai";
-  const fallbackAggregation =
-    props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly";
-  const aggregation = config.value?.aggregation ?? fallbackAggregation;
-  const method = config.value?.method ?? (aggregation === "monthly" ? "mtm" : "qtq");
-
-  if (measure === "nilai") return getBaseSeries(props.datasets, aggregation);
-  return getGrowthSeries(props.datasets, aggregation, method);
-});
+const preparedSeries = computed(() => getSeriesByConfig(props.datasets, config.value));
 
 const getLastNonNull = (arr) => {
   for (let i = arr.length - 1; i >= 0; i--) {
@@ -117,42 +77,68 @@ const getLastNonNull = (arr) => {
   return null;
 };
 
-const getPrevNonNull = (arr) => {
-  let found = 0;
-  for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i] !== null && arr[i] !== undefined) {
-      found++;
-      if (found === 2) return arr[i];
-    }
-  }
-  return null;
+const getLastTwoNonNull = (arr = []) => {
+  const valid = arr.filter((v) => v !== null && v !== undefined);
+  if (!valid.length) return { prev: null, last: null };
+  if (valid.length === 1) return { prev: null, last: valid[0] };
+
+  return {
+    prev: valid[valid.length - 2],
+    last: valid[valid.length - 1],
+  };
 };
 
-const last = computed(() => getLastNonNull(preparedSeries.value));
-const prev = computed(() => getPrevNonNull(preparedSeries.value));
-
-const isUp = computed(() => (Number(last.value ?? 0) - Number(prev.value ?? 0)) >= 0);
+const last = computed(() => getLastNonNull(preparedSeries.value.data ?? []));
+const isGrowthMode = computed(() => (config.value?.measure ?? "nilai") === "pertumbuhan");
 
 const displayValue = computed(() => {
   if (last.value === null || last.value === undefined) return "-";
-  return Number(last.value).toFixed(2);
+  const suffix = isGrowthMode.value ? "%" : "";
+  return `${Number(last.value).toFixed(2)}${suffix}`;
 });
 
-const growthText = computed(() => {
-  const l = Number(last.value ?? 0);
-  const p = Number(prev.value ?? 0);
-  if (!p) return "0.00%";
-  const v = ((l - p) / p) * 100;
-  const sign = v > 0 ? "+" : "";
-  return `${sign}${v.toFixed(2)}%`;
+const metricSecondaryText = computed(() => {
+  const latestNilai =
+    getLastNonNull(props.datasets?.series?.monthly ?? []) ??
+    getLastNonNull(props.datasets?.series?.quarterly ?? []) ??
+    getLastNonNull(props.datasets?.series?.yearly ?? []);
+
+  if (latestNilai === null || latestNilai === undefined) return "-";
+  return Number(latestNilai).toFixed(2);
 });
+
+const trendDirection = computed(() => {
+  const { prev, last } = getLastTwoNonNull(preparedSeries.value?.data ?? []);
+  if (prev === null || prev === undefined || last === null || last === undefined) return 0;
+  if (last > prev) return 1;
+  if (last < prev) return -1;
+  return 0;
+});
+
+const isUp = computed(() => trendDirection.value >= 0);
 
 const isSelected = computed(() => chartStore.isSelected(props.datasets.id));
 const isPrimary = computed(() => chartStore.primaryId === props.datasets.id);
 const isDisabled = computed(() => chartStore.isLocked && !isSelected.value);
 const isExpanded = computed(() => chartStore.isExpanded(props.datasets.id));
 
-const canChooseMonthly = computed(() => props.datasets.rawFrequency === "monthly");
+const apiPrefix = computed(() =>
+  String(props.datasets?.apiFreqPrefix ?? props.datasets?.apiCode ?? "")
+    .charAt(0)
+    .toUpperCase()
+);
+
+const canChooseMonthly = computed(() => {
+  if (apiPrefix.value === "Q") return false;
+  return props.datasets.rawFrequency === "monthly";
+});
+
+const canChooseQuarterly = computed(() =>
+  props.datasets.rawFrequency === "monthly" ||
+  props.datasets.rawFrequency === "quarterly"
+);
+
+const canChooseYearly = computed(() => true);
 
 const isCardMonthlyDisabled = computed(() => {
   if (!canChooseMonthly.value) return true;
@@ -161,14 +147,36 @@ const isCardMonthlyDisabled = computed(() => {
 });
 
 const isCardQuarterlyDisabled = computed(() => {
+  if (!canChooseQuarterly.value) return true;
   if (!props.isGabung) return false;
   return props.quarterlyDisabled;
 });
 
 const showAggregationFilter = computed(() => !!config.value.measure);
 const showMethodFilter = computed(
-  () => config.value.measure === "pertumbuhan" && !!config.value.aggregation
+  () =>
+    config.value.measure === "pertumbuhan" &&
+    !!config.value.aggregation &&
+    config.value.aggregation !== "yearly"
 );
+
+const currentMethodOptions = computed(() => {
+  if (config.value?.aggregation === "monthly") {
+    return FILTER_OPTIONS.monthlyMethods;
+  }
+
+  if (config.value?.aggregation === "quarterly") {
+    return FILTER_OPTIONS.quarterlyMethods;
+  }
+
+  return [];
+});
+
+const methodLabel = computed(() => {
+  if (config.value?.aggregation === "monthly") return "Metode Bulanan";
+  if (config.value?.aggregation === "quarterly") return "Metode Triwulanan";
+  return "Metode";
+});
 
 const onClickCard = () => {
   if (isDisabled.value) return;
@@ -188,24 +196,30 @@ const onToggleCompare = () => {
 
 const onMeasureChange = (e) => {
   const measure = e.target.value;
-  chartStore.setMeasure(props.datasets.id, measure, props.datasets);
-
-  if (measure === "pertumbuhan") {
-    const defaultAggregation =
-      props.datasets.rawFrequency === "quarterly" ? "quarterly" : "monthly";
-    const defaultMethod = defaultAggregation === "monthly" ? "mtm" : "qtq";
-
-    chartStore.setAggregation(props.datasets.id, defaultAggregation, props.datasets);
-    chartStore.setMethod(props.datasets.id, defaultMethod, props.datasets);
-  }
+  chartStore.setMeasure(props.datasets.id, measure);
 };
 
 const onAggregationChange = (e) => {
-  chartStore.setAggregation(props.datasets.id, e.target.value, props.datasets);
+  const aggregation = e.target.value;
+  chartStore.setAggregation(props.datasets.id, aggregation);
+
+  if (aggregation === "monthly") {
+    chartStore.setMethod(props.datasets.id, "mtom");
+    return;
+  }
+
+  if (aggregation === "quarterly") {
+    chartStore.setMethod(props.datasets.id, "qtoq");
+    return;
+  }
+
+  if (aggregation === "yearly") {
+    chartStore.setMethod(props.datasets.id, "annual");
+  }
 };
 
 const onMethodChange = (e) => {
-  chartStore.setMethod(props.datasets.id, e.target.value, props.datasets);
+  chartStore.setMethod(props.datasets.id, e.target.value);
 };
 </script>
 
@@ -244,8 +258,11 @@ const onMethodChange = (e) => {
           {{ displayValue }}
         </h1>
 
-        <p class="text-[14px] font-semibold leading-tight" :class="isUp ? 'text-green-500' : 'text-red-500'">
-          {{ growthText }}
+        <p
+          class="text-[14px] font-semibold leading-tight"
+          :class="isUp ? 'text-green-500' : 'text-red-500'"
+        >
+          {{ metricSecondaryText }}
         </p>
       </div>
 
@@ -279,45 +296,32 @@ const onMethodChange = (e) => {
       </div>
 
       <div v-if="showAggregationFilter" class="mt-3">
-        <label class="block text-[12px] mb-1 theme-text-muted">Pilih Frekuensi</label>
+        <label class="block text-[12px] mb-1 theme-text-muted">Pilih Periode</label>
         <select
           class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
           :value="config.aggregation ?? ''"
           @change="onAggregationChange"
         >
-          <option value="" disabled>Pilih frekuensi</option>
+          <option value="" disabled>Pilih periode</option>
           <option value="monthly" :disabled="isCardMonthlyDisabled">Bulanan</option>
           <option value="quarterly" :disabled="isCardQuarterlyDisabled">Triwulanan</option>
+          <option value="yearly" :disabled="!canChooseYearly">Tahunan</option>
         </select>
 
         <p v-if="!canChooseMonthly" class="text-[11px] mt-1 theme-text-muted">
-          Data triwulanan hanya bisa memilih filter triwulanan.
+          Kode dengan prefix Q tidak bisa memilih periode bulanan.
         </p>
       </div>
 
-      <div v-if="showMethodFilter && config.aggregation === 'monthly'" class="mt-3">
-        <label class="block text-[12px] mb-1 theme-text-muted">Metode Bulanan</label>
+      <div v-if="showMethodFilter" class="mt-3">
+        <label class="block text-[12px] mb-1 theme-text-muted">{{ methodLabel }}</label>
         <select
           class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
           :value="config.method ?? ''"
           @change="onMethodChange"
         >
           <option value="" disabled>Pilih metode</option>
-          <option v-for="opt in FILTER_OPTIONS.monthlyMethods" :key="opt.value" :value="opt.value">
-            {{ opt.label }}
-          </option>
-        </select>
-      </div>
-
-      <div v-if="showMethodFilter && config.aggregation === 'quarterly'" class="mt-3">
-        <label class="block text-[12px] mb-1 theme-text-muted">Metode Triwulanan</label>
-        <select
-          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
-          :value="config.method ?? ''"
-          @change="onMethodChange"
-        >
-          <option value="" disabled>Pilih metode</option>
-          <option v-for="opt in FILTER_OPTIONS.quarterlyMethods" :key="opt.value" :value="opt.value">
+          <option v-for="opt in currentMethodOptions" :key="opt.value" :value="opt.value">
             {{ opt.label }}
           </option>
         </select>

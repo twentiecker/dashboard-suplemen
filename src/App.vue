@@ -2,7 +2,12 @@
 import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useChartStore } from "./stores/useChartStore";
 import CardComponent from "./components/CardComponent.vue";
-import { fetchPkrtIndicators, buildDatasetFromApi } from "./services/pkrtAPI";
+import {
+  fetchPkrtIndicators,
+  buildDatasetFromApi,
+  fetchPdbIndicators,
+  buildPdbDatasetFromApi,
+} from "./services/pkrtAPI";
 
 const isGabung = ref(false);
 const isMerging = ref(false);
@@ -29,29 +34,36 @@ const snapshotPieces = ref([]);
 const cards = ref([]);
 const isLoadingCards = ref(false);
 
+const pkrtIndicatorOptions = ref([]);
+const pdbIndicatorOptions = ref([]);
+const activeStaticDatasetRef = ref(null);
+
+const pkrtDatasetCache = new Map();
+const pdbDatasetCache = new Map();
+
 const FILTER_OPTIONS = {
   measure: [
     { label: "Nilai", value: "nilai" },
     { label: "Pertumbuhan", value: "pertumbuhan" },
   ],
   monthlyMethods: [
-    { label: "M to M", value: "mtm" },
-    { label: "Y on Y", value: "yoy" },
-    { label: "Y to D", value: "ytd" },
+    { label: "M to M", value: "mtom" },
+    { label: "Y on Y", value: "yony" },
+    { label: "Y to D", value: "ytod" },
   ],
   quarterlyMethods: [
-    { label: "Q to Q", value: "qtq" },
-    { label: "Y on Y", value: "yoy" },
-    { label: "C to C", value: "ctc" },
+    { label: "Q to Q", value: "qtoq" },
+    { label: "Y on Y", value: "yony" },
+    { label: "C to C", value: "ctoc" },
   ],
   staticPeriod: [
     { label: "Triwulanan", value: "quarterly" },
     { label: "Tahunan", value: "yearly" },
   ],
   staticQuarterlyMethods: [
-    { label: "Q to Q", value: "qtq" },
-    { label: "Y on Y", value: "yoy" },
-    { label: "C to C", value: "ctc" },
+    { label: "Q to Q", value: "qtoq" },
+    { label: "Y on Y", value: "yony" },
+    { label: "C to C", value: "ctoc" },
   ],
   chartTypes: [
     { label: "Line Chart", value: "line" },
@@ -69,6 +81,12 @@ const monthNames = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
+
+const normalizeYearLikePeriod = (period) => {
+  const text = String(period ?? "").trim();
+  const match = text.match(/^(\d{4})/);
+  return match ? match[1] : text;
+};
 
 const parsePeriod = (period) => {
   const text = String(period ?? "").trim().toUpperCase();
@@ -144,7 +162,7 @@ const formatYearMergeTickLabel = (raw, primaryAggregation = "") => {
   }
 
   if (type === "total") {
-    return String(period ?? "");
+    return normalizeYearLikePeriod(period);
   }
 
   return "";
@@ -171,7 +189,7 @@ const formatTooltipPeriod = (period, aggregationHint = "") => {
     if (type === "total") {
       if (p.type === "quarterly") return `Q${p.quarter} ${p.year}`;
       if (p.type === "yearly") return `${p.year}`;
-      return `${basePeriod}`;
+      return normalizeYearLikePeriod(basePeriod);
     }
   }
 
@@ -186,17 +204,6 @@ const formatTooltipPeriod = (period, aggregationHint = "") => {
   if (aggregationHint === "yearly") return String(period ?? "");
 
   return String(period ?? "");
-};
-
-const isQuarterEndPeriod = (period) => {
-  const p = parsePeriod(period);
-  return p.type === "monthly" && [3, 6, 9, 12].includes(p.month);
-};
-
-const monthPeriodToQuarterPeriod = (period) => {
-  const p = parsePeriod(period);
-  if (p.type !== "monthly") return null;
-  return `${p.year}Q${p.quarter}`;
 };
 
 const getMonthLabelStep = (count) => {
@@ -225,7 +232,7 @@ const buildMonthlyTickLabel = (period, index, totalCount, mode = "default") => {
 
   const monthLabel = monthNames[parsed.month - 1] ?? "";
 
-  if (mode === "ytd") {
+  if (mode === "ytod") {
     if (parsed.month === 1) return [monthLabel, String(parsed.year)];
     return monthLabel;
   }
@@ -249,74 +256,34 @@ const buildQuarterlyTickLabel = (period, index, totalCount, forceShowAll = false
   return `Q${parsed.quarter} ${parsed.year}`;
 };
 
-const sumSafe = (arr) => arr.reduce((a, b) => a + Number(b ?? 0), 0);
-
-const monthlyToQuarterlyByPeriods = (monthly = [], periods = []) => {
-  const data = [];
-  const outPeriods = [];
-
-  periods.forEach((period, index) => {
-    if (isQuarterEndPeriod(period)) {
-      data.push(monthly[index] ?? null);
-      outPeriods.push(monthPeriodToQuarterPeriod(period));
-    }
+const dedupePeriods = (periods = []) =>
+  [...new Set(periods.filter(Boolean))].sort((a, b) => {
+    const pa = parsePeriod(a);
+    const pb = parsePeriod(b);
+    return pa.order - pb.order;
   });
-
-  return { data, periods: outPeriods };
-};
-
-const quarterlyToYearlyByPeriods = (quarterly = [], periods = []) => {
-  const bucket = new Map();
-
-  periods.forEach((period, index) => {
-    const parsed = parsePeriod(period);
-    if (!parsed.year) return;
-
-    if (!bucket.has(parsed.year)) bucket.set(parsed.year, []);
-    bucket.get(parsed.year).push(quarterly[index] ?? null);
-  });
-
-  const years = [...bucket.keys()].sort((a, b) => a - b);
-  const data = years.map((year) => Number(sumSafe(bucket.get(year)).toFixed(2)));
-  const outPeriods = years.map(String);
-
-  return { data, periods: outPeriods };
-};
 
 const getSeriesMeta = (dataset, aggregation) => {
-  const monthlyPeriods = Array.isArray(dataset?.derivedPeriods?.monthly)
-    ? dataset.derivedPeriods.monthly
-    : Array.isArray(dataset?.periods)
-      ? dataset.periods
-      : [];
-
-  const quarterlyPeriods = Array.isArray(dataset?.derivedPeriods?.quarterly)
-    ? dataset.derivedPeriods.quarterly
-    : dataset?.rawFrequency === "quarterly"
-      ? (Array.isArray(dataset?.periods) ? dataset.periods : [])
-      : monthlyToQuarterlyByPeriods(dataset?.series?.monthly ?? [], monthlyPeriods).periods;
-
   if (aggregation === "monthly") {
     return {
-      data: dataset?.series?.monthly ?? [],
-      periods: monthlyPeriods,
+      data: Array.isArray(dataset?.series?.monthly) ? dataset.series.monthly : [],
+      periods: Array.isArray(dataset?.derivedPeriods?.monthly) ? dataset.derivedPeriods.monthly : [],
       aggregation: "monthly",
     };
   }
 
   if (aggregation === "quarterly") {
     return {
-      data: dataset?.series?.quarterly ?? [],
-      periods: quarterlyPeriods,
+      data: Array.isArray(dataset?.series?.quarterly) ? dataset.series.quarterly : [],
+      periods: Array.isArray(dataset?.derivedPeriods?.quarterly) ? dataset.derivedPeriods.quarterly : [],
       aggregation: "quarterly",
     };
   }
 
   if (aggregation === "yearly") {
-    const yearlyMeta = quarterlyToYearlyByPeriods(dataset?.series?.quarterly ?? [], quarterlyPeriods);
     return {
-      data: yearlyMeta.data,
-      periods: yearlyMeta.periods,
+      data: Array.isArray(dataset?.series?.yearly) ? dataset.series.yearly : [],
+      periods: Array.isArray(dataset?.derivedPeriods?.yearly) ? dataset.derivedPeriods.yearly : [],
       aggregation: "yearly",
     };
   }
@@ -329,6 +296,32 @@ const getSeriesMeta = (dataset, aggregation) => {
 };
 
 const getBackendGrowthMeta = (dataset, aggregation, method, fallbackPeriods = []) => {
+  if (aggregation === "yearly") {
+    const payload = dataset?.growth?.yearly;
+
+    if (Array.isArray(payload)) {
+      return {
+        data: payload,
+        periods: fallbackPeriods,
+        aggregation: "yearly",
+      };
+    }
+
+    if (payload && typeof payload === "object") {
+      return {
+        data: Array.isArray(payload.data) ? payload.data : [],
+        periods: Array.isArray(payload.periods) ? payload.periods : fallbackPeriods,
+        aggregation: "yearly",
+      };
+    }
+
+    return {
+      data: [],
+      periods: fallbackPeriods,
+      aggregation: "yearly",
+    };
+  }
+
   const payload = dataset?.growth?.[aggregation]?.[method];
 
   if (Array.isArray(payload)) {
@@ -357,8 +350,20 @@ const getBackendGrowthMeta = (dataset, aggregation, method, fallbackPeriods = []
 const getPreparedSeriesMeta = (dataset, config) => {
   const measure = config?.measure ?? "nilai";
   const aggregation =
-    config?.aggregation ?? (dataset.rawFrequency === "quarterly" ? "quarterly" : "monthly");
-  const method = config?.method ?? (aggregation === "monthly" ? "mtm" : "qtq");
+    config?.aggregation ??
+    (dataset.rawFrequency === "monthly"
+      ? "monthly"
+      : dataset.rawFrequency === "quarterly"
+        ? "quarterly"
+        : "yearly");
+
+  const method =
+    config?.method ??
+    (aggregation === "monthly"
+      ? "mtom"
+      : aggregation === "quarterly"
+        ? "qtoq"
+        : "annual");
 
   const baseMeta = getSeriesMeta(dataset, aggregation);
 
@@ -373,13 +378,6 @@ const toPointData = (meta) =>
     y: meta.data[index] ?? null,
   }));
 
-const dedupePeriods = (periods = []) =>
-  [...new Set(periods.filter(Boolean))].sort((a, b) => {
-    const pa = parsePeriod(a);
-    const pb = parsePeriod(b);
-    return pa.order - pb.order;
-  });
-
 const aggregationToAxisId = (aggregation) => {
   if (aggregation === "monthly") return "xMonthly";
   if (aggregation === "quarterly") return "xQuarterly";
@@ -387,19 +385,70 @@ const aggregationToAxisId = (aggregation) => {
   return "xMonthly";
 };
 
+const mapWithConcurrency = async (items, mapper, limit = 4) => {
+  const results = new Array(items.length);
+  let currentIndex = 0;
+
+  const worker = async () => {
+    while (currentIndex < items.length) {
+      const index = currentIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  };
+
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker()
+  );
+
+  await Promise.all(workers);
+  return results;
+};
+
+const getCachedPkrtDataset = async (item) => {
+  const key = String(item.kode);
+  if (pkrtDatasetCache.has(key)) return pkrtDatasetCache.get(key);
+
+  const dataset = await buildDatasetFromApi({
+    kode: item.kode,
+    deskripsi: item.deskripsi,
+  });
+
+  if (dataset) {
+    pkrtDatasetCache.set(key, dataset);
+  }
+
+  return dataset;
+};
+
+const getCachedPdbDataset = async ({ kode, deskripsi, measure }) => {
+  const key = `${kode}-${measure}`;
+  if (pdbDatasetCache.has(key)) return pdbDatasetCache.get(key);
+
+  const dataset = await buildPdbDatasetFromApi({
+    kode,
+    deskripsi,
+    measure,
+  });
+
+  if (dataset) {
+    pdbDatasetCache.set(key, dataset);
+  }
+
+  return dataset;
+};
+
 const loadCardsFromApi = async () => {
   try {
     isLoadingCards.value = true;
 
     const indikator = await fetchPkrtIndicators();
+    pkrtIndicatorOptions.value = indikator;
 
-    const datasets = await Promise.all(
-      indikator.map((item) =>
-        buildDatasetFromApi({
-          kode: item.kode,
-          deskripsi: item.deskripsi,
-        })
-      )
+    const datasets = await mapWithConcurrency(
+      indikator,
+      async (item) => await getCachedPkrtDataset(item),
+      3
     );
 
     const validDatasets = datasets.filter((item) => item && item.id);
@@ -407,7 +456,6 @@ const loadCardsFromApi = async () => {
 
     if (validDatasets.length) {
       chartStore.initPrimary(validDatasets[0]);
-      staticComponent.value = validDatasets[0].id;
     }
   } catch (err) {
     console.error("Gagal load PKRT data", err);
@@ -417,19 +465,76 @@ const loadCardsFromApi = async () => {
   }
 };
 
+const loadPdbIndicatorOptions = async () => {
+  try {
+    const indikator = await fetchPdbIndicators();
+    pdbIndicatorOptions.value = indikator;
+
+    if (!staticComponent.value && indikator.length) {
+      staticComponent.value = String(indikator[0].kode);
+    }
+  } catch (err) {
+    console.error("Gagal load indikator PDB", err);
+    pdbIndicatorOptions.value = [];
+    staticComponent.value = "";
+  }
+};
+
+const loadActiveStaticDataset = async () => {
+  try {
+    if (!staticComponent.value) {
+      activeStaticDatasetRef.value = null;
+      return;
+    }
+
+    const found = pdbIndicatorOptions.value.find(
+      (item) => String(item.kode) === String(staticComponent.value)
+    );
+
+    if (!found) {
+      activeStaticDatasetRef.value = null;
+      return;
+    }
+
+    const dataset = await getCachedPdbDataset({
+      kode: found.kode,
+      deskripsi: found.deskripsi,
+      measure: staticMeasure.value,
+    });
+
+    activeStaticDatasetRef.value = dataset ?? null;
+  } catch (err) {
+    console.error("Gagal load dataset PDB aktif", err);
+    activeStaticDatasetRef.value = null;
+  }
+};
+
 onMounted(async () => {
-  await loadCardsFromApi();
+  await Promise.all([
+    loadCardsFromApi(),
+    loadPdbIndicatorOptions(),
+  ]);
+
+  await loadActiveStaticDataset();
 });
 
-watch(staticComponent, (val) => {
+watch(staticMeasure, async () => {
+  await loadActiveStaticDataset();
+});
+
+watch(staticComponent, async (val) => {
   if (!val) {
     staticPeriod.value = "";
     staticMethod.value = "";
+    activeStaticDatasetRef.value = null;
     return;
   }
+
   if (!staticPeriod.value) {
     staticPeriod.value = "quarterly";
   }
+
+  await loadActiveStaticDataset();
 });
 
 watch(staticPeriod, (val) => {
@@ -437,10 +542,14 @@ watch(staticPeriod, (val) => {
     staticMethod.value = "";
     return;
   }
+
   if (val === "quarterly") {
-    if (!staticMethod.value) staticMethod.value = "qtq";
-  } else {
-    staticMethod.value = "";
+    if (!staticMethod.value) staticMethod.value = "qtoq";
+    return;
+  }
+
+  if (val === "yearly") {
+    staticMethod.value = "annual";
   }
 });
 
@@ -471,18 +580,11 @@ const palette = [
 ];
 
 const DATASET_COLOR_FAMILIES = [
-  ["#60A5FA", "#3B82F6", "#2563EB", "#1D4ED8", "#1E40AF"],
-  ["#FBBF24", "#F59E0B", "#D97706", "#B45309", "#92400E"],
-  ["#C084FC", "#A855F7", "#9333EA", "#7E22CE", "#6B21A8"],
-  ["#34D399", "#10B981", "#059669", "#047857", "#065F46"],
-  ["#F87171", "#EF4444", "#DC2626", "#B91C1C", "#991B1B"],
-  ["#22D3EE", "#06B6D4", "#0891B2", "#0E7490", "#155E75"],
-  ["#FB7185", "#F43F5E", "#E11D48", "#BE123C", "#9F1239"],
-  ["#A3E635", "#84CC16", "#65A30D", "#4D7C0F", "#3F6212"],
-  ["#F9A8D4", "#EC4899", "#DB2777", "#BE185D", "#9D174D"],
-  ["#FDBA74", "#F97316", "#EA580C", "#C2410C", "#9A3412"],
-  ["#93C5FD", "#38BDF8", "#0EA5E9", "#0284C7", "#0369A1"],
-  ["#D8B4FE", "#C084FC", "#A855F7", "#9333EA", "#7E22CE"],
+  ["#2563EB", "#3B82F6", "#60A5FA", "#93C5FD", "#BFDBFE"], // biru
+  ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"], // merah
+  ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"], // hijau
+  ["#EA580C", "#F97316", "#FB923C", "#FDBA74", "#FFEDD5"], // oranye
+  ["#BE185D", "#DB2777", "#EC4899", "#F9A8D4", "#FCE7F3"], // pink
 ];
 
 const hexToRgb = (hex) => {
@@ -504,21 +606,26 @@ const toRgba = (hex, alpha = 1) => {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 };
 
-const getDatasetFamilyIndex = (datasetId) => {
-  const text = String(datasetId ?? "");
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+const getDatasetFamilyIndex = (datasetId, datasetOrderMap = {}) => {
+  const id = String(datasetId ?? "");
+  const mappedIndex = datasetOrderMap[id];
+
+  if (mappedIndex !== undefined && mappedIndex !== null) {
+    return mappedIndex % DATASET_COLOR_FAMILIES.length;
   }
-  return hash % DATASET_COLOR_FAMILIES.length;
+
+  return 0;
 };
 
 const getDatasetStackColor = ({
   datasetId,
   slot = 1,
   mode = "month",
+  datasetOrderMap = {},
 }) => {
-  const family = DATASET_COLOR_FAMILIES[getDatasetFamilyIndex(datasetId)];
+  const family = DATASET_COLOR_FAMILIES[
+    getDatasetFamilyIndex(datasetId, datasetOrderMap)
+  ];
 
   if (mode === "quarter") {
     const quarterIndexes = [0, 1, 2, 3];
@@ -535,7 +642,7 @@ const getDatasetStackColor = ({
   const hex = family[idx];
   return {
     line: hex,
-    fill: toRgba(hex, 0.90),
+    fill: toRgba(hex, 0.9),
   };
 };
 
@@ -545,21 +652,13 @@ const TOTAL_BAR_COLOR = {
 };
 
 const staticComponentOptions = computed(() =>
-  cards.value.map((item) => ({
-    label: `${item.groupCode} - ${item.indicatorName}`,
-    value: item.id,
+  pdbIndicatorOptions.value.map((item) => ({
+    label: `${item.kode} - ${item.deskripsi}`,
+    value: String(item.kode),
   }))
 );
 
-const staticDatasetMap = computed(() => {
-  const map = {};
-  cards.value.forEach((item) => {
-    map[item.id] = { ...item, isStatic: true };
-  });
-  return map;
-});
-
-const activeStaticDataset = computed(() => staticDatasetMap.value[staticComponent.value] ?? null);
+const activeStaticDataset = computed(() => activeStaticDatasetRef.value ?? null);
 
 const staticSeriesMeta = computed(() => {
   if (!activeStaticDataset.value || !staticPeriod.value) {
@@ -572,21 +671,27 @@ const staticSeriesMeta = computed(() => {
     return getSeriesMeta(activeStaticDataset.value, aggregation);
   }
 
+  const baseMeta = getSeriesMeta(activeStaticDataset.value, aggregation);
+
   if (aggregation === "yearly") {
-    return getSeriesMeta(activeStaticDataset.value, "yearly");
+    return getBackendGrowthMeta(activeStaticDataset.value, "yearly", "annual", baseMeta.periods);
   }
 
   if (staticMethod.value) {
-    const baseQuarterMeta = getSeriesMeta(activeStaticDataset.value, "quarterly");
     return getBackendGrowthMeta(
       activeStaticDataset.value,
       "quarterly",
       staticMethod.value,
-      baseQuarterMeta.periods
+      baseMeta.periods
     );
   }
 
-  return getSeriesMeta(activeStaticDataset.value, "quarterly");
+  return getBackendGrowthMeta(
+    activeStaticDataset.value,
+    "quarterly",
+    "qtoq",
+    baseMeta.periods
+  );
 });
 
 const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
@@ -603,24 +708,44 @@ const primaryMethod = computed(() => primaryRawConfig.value?.method ?? null);
 
 const showPrimaryAggregationFilter = computed(() => !!primaryMeasure.value);
 const showPrimaryMethodFilter = computed(
-  () => primaryMeasure.value === "pertumbuhan" && !!primaryAggregation.value
+  () =>
+    primaryMeasure.value === "pertumbuhan" &&
+    !!primaryAggregation.value &&
+    primaryAggregation.value !== "yearly"
 );
 
-const canChoosePrimaryMonthly = computed(() => primaryDataset.value?.rawFrequency === "monthly");
+const primaryApiPrefix = computed(() =>
+  String(primaryDataset.value?.apiFreqPrefix ?? primaryDataset.value?.apiCode ?? "")
+    .charAt(0)
+    .toUpperCase()
+);
+
+const canChoosePrimaryMonthly = computed(() => {
+  if (!primaryDataset.value) return false;
+  if (primaryApiPrefix.value === "Q") return false;
+  return primaryDataset.value.rawFrequency === "monthly";
+});
+
+const canChoosePrimaryQuarterly = computed(() =>
+  primaryDataset.value?.rawFrequency === "monthly" ||
+  primaryDataset.value?.rawFrequency === "quarterly"
+);
+
+const canChoosePrimaryYearly = computed(() => !!primaryDataset.value);
 
 const onPrimaryMeasureChange = (e) => {
   if (!primaryDataset.value) return;
-  chartStore.setMeasure(primaryDataset.value.id, e.target.value, primaryDataset.value);
+  chartStore.setMeasure(primaryDataset.value.id, e.target.value);
 };
 
 const onPrimaryAggregationChange = (e) => {
   if (!primaryDataset.value) return;
-  chartStore.setAggregation(primaryDataset.value.id, e.target.value, primaryDataset.value);
+  chartStore.setAggregation(primaryDataset.value.id, e.target.value);
 };
 
 const onPrimaryMethodChange = (e) => {
   if (!primaryDataset.value) return;
-  chartStore.setMethod(primaryDataset.value.id, e.target.value, primaryDataset.value);
+  chartStore.setMethod(primaryDataset.value.id, e.target.value);
 };
 
 const getEffectiveAggregation = (dataset) => {
@@ -628,7 +753,11 @@ const getEffectiveAggregation = (dataset) => {
   const rawConfig = chartStore.compareConfigs[id] ?? null;
 
   return rawConfig?.aggregation ??
-    (dataset.rawFrequency === "quarterly" ? "quarterly" : "monthly");
+    (dataset.rawFrequency === "monthly"
+      ? "monthly"
+      : dataset.rawFrequency === "quarterly"
+        ? "quarterly"
+        : "yearly");
 };
 
 const getAxisLevelCount = (aggregations) => {
@@ -711,9 +840,10 @@ const getAxisLevelCountForCardSelection = ({
 };
 
 const isPrimaryMonthlyDisabled = computed(() => {
+  if (!primaryDataset.value) return true;
+  if (!canChoosePrimaryMonthly.value) return true;
   if (!isGabung.value) return false;
   if (!primaryMeasure.value) return false;
-  if (!canChoosePrimaryMonthly.value) return true;
 
   return getAxisLevelCountFromSelections({
     primaryAggregationCandidate: "monthly",
@@ -722,11 +852,25 @@ const isPrimaryMonthlyDisabled = computed(() => {
 });
 
 const isPrimaryQuarterlyDisabled = computed(() => {
+  if (!primaryDataset.value) return true;
+  if (!canChoosePrimaryQuarterly.value) return true;
   if (!isGabung.value) return false;
   if (!primaryMeasure.value) return false;
 
   return getAxisLevelCountFromSelections({
     primaryAggregationCandidate: "quarterly",
+    staticPeriodCandidate: staticPeriod.value,
+  }) > 2;
+});
+
+const isPrimaryYearlyDisabled = computed(() => {
+  if (!primaryDataset.value) return true;
+  if (!canChoosePrimaryYearly.value) return true;
+  if (!isGabung.value) return false;
+  if (!primaryMeasure.value) return false;
+
+  return getAxisLevelCountFromSelections({
+    primaryAggregationCandidate: "yearly",
     staticPeriodCandidate: staticPeriod.value,
   }) > 2;
 });
@@ -752,9 +896,10 @@ const isStaticYearlyDisabled = computed(() => {
 });
 
 const isCardMonthlyDisabled = (card) => {
-  if (!isGabung.value) return false;
-  if (!card) return false;
+  if (!card) return true;
+  if (String(card?.apiFreqPrefix ?? card?.apiCode ?? "").charAt(0).toUpperCase() === "Q") return true;
   if (card.rawFrequency !== "monthly") return true;
+  if (!isGabung.value) return false;
 
   return getAxisLevelCountForCardSelection({
     cardId: card.id,
@@ -763,8 +908,13 @@ const isCardMonthlyDisabled = (card) => {
 };
 
 const isCardQuarterlyDisabled = (card) => {
+  if (!card) return true;
+  const canQuarterly =
+    card.rawFrequency === "monthly" ||
+    card.rawFrequency === "quarterly";
+
+  if (!canQuarterly) return true;
   if (!isGabung.value) return false;
-  if (!card) return false;
 
   return getAxisLevelCountForCardSelection({
     cardId: card.id,
@@ -787,8 +937,11 @@ watch(
     staticComponent,
     staticPeriod,
     canChoosePrimaryMonthly,
+    canChoosePrimaryQuarterly,
+    canChoosePrimaryYearly,
     isPrimaryMonthlyDisabled,
     isPrimaryQuarterlyDisabled,
+    isPrimaryYearlyDisabled,
     isStaticQuarterlyDisabled,
     isStaticYearlyDisabled,
   ],
@@ -797,14 +950,32 @@ watch(
     if (!primaryDataset.value) return;
 
     if (primaryAggregation.value === "monthly" && isPrimaryMonthlyDisabled.value) {
-      if (!isPrimaryQuarterlyDisabled.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "quarterly", primaryDataset.value);
+      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
+        return;
+      }
+      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "yearly");
       }
     }
 
     if (primaryAggregation.value === "quarterly" && isPrimaryQuarterlyDisabled.value) {
       if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "monthly", primaryDataset.value);
+        chartStore.setAggregation(primaryDataset.value.id, "monthly");
+        return;
+      }
+      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "yearly");
+      }
+    }
+
+    if (primaryAggregation.value === "yearly" && isPrimaryYearlyDisabled.value) {
+      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
+        return;
+      }
+      if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "monthly");
       }
     }
 
@@ -850,21 +1021,64 @@ const compatibleLeftSeries = computed(() =>
   })
 );
 
+const activeLeftSeries = computed(() => {
+  if (!primaryDataset.value) return [];
+
+  if (!isGabung.value) {
+    return leftPreparedDynamicSeries.value;
+  }
+
+  return compatibleLeftSeries.value;
+});
+
+const activeDatasetOrderMap = computed(() => {
+  const map = {};
+
+  activeLeftSeries.value.forEach((item, index) => {
+    map[String(item.dataset.id)] = index;
+  });
+
+  return map;
+});
+
+watch(
+  [primaryMeasure, primaryAggregation, primaryMethod, activeLeftSeries],
+  () => {
+    console.log("primaryMeasure:", primaryMeasure.value);
+    console.log("primaryAggregation:", primaryAggregation.value);
+    console.log("primaryMethod:", primaryMethod.value);
+    console.log(
+      "activeLeftSeries aggregation:",
+      activeLeftSeries.value.map((x) => x.aggregation)
+    );
+    console.log(
+      "activeLeftSeries periods sample:",
+      activeLeftSeries.value[0]?.meta?.periods?.slice(0, 10)
+    );
+    console.log(
+      "activeLeftSeries data sample:",
+      activeLeftSeries.value[0]?.meta?.data?.slice(0, 10)
+    );
+  },
+  { immediate: true, deep: true }
+);
+
 const hasIncompatibleLeftSeries = computed(() =>
   leftPreparedDynamicSeries.value.length !== compatibleLeftSeries.value.length
 );
 
 const hasMonthlySeriesLeft = computed(() =>
-  leftPreparedDynamicSeries.value.some((item) => item.aggregation === "monthly")
+  activeLeftSeries.value.some((item) => item.aggregation === "monthly")
 );
 
 const hasQuarterlySeriesLeft = computed(() => {
-  if (leftPreparedDynamicSeries.value.some((item) => item.aggregation === "quarterly")) return true;
+  if (activeLeftSeries.value.some((item) => item.aggregation === "quarterly")) return true;
   return isGabung.value && !!activeStaticDataset.value && staticPeriod.value === "quarterly";
 });
 
 const hasYearlySeriesLeft = computed(() =>
-  isGabung.value && !!activeStaticDataset.value && staticPeriod.value === "yearly"
+  activeLeftSeries.value.some((item) => item.aggregation === "yearly") ||
+  (isGabung.value && !!activeStaticDataset.value && staticPeriod.value === "yearly")
 );
 
 const isMixedMonthlyQuarterlyAxis = computed(() =>
@@ -873,7 +1087,7 @@ const isMixedMonthlyQuarterlyAxis = computed(() =>
 
 const leftMonthlyAxisPeriods = computed(() => {
   const periods = [];
-  leftPreparedDynamicSeries.value.forEach((item) => {
+  activeLeftSeries.value.forEach((item) => {
     if (item.aggregation === "monthly") periods.push(...item.meta.periods);
   });
   return dedupePeriods(periods);
@@ -881,7 +1095,7 @@ const leftMonthlyAxisPeriods = computed(() => {
 
 const leftQuarterlyAxisPeriods = computed(() => {
   const periods = [];
-  leftPreparedDynamicSeries.value.forEach((item) => {
+  activeLeftSeries.value.forEach((item) => {
     if (item.aggregation === "quarterly") periods.push(...item.meta.periods);
   });
 
@@ -894,9 +1108,14 @@ const leftQuarterlyAxisPeriods = computed(() => {
 
 const leftYearlyAxisPeriods = computed(() => {
   const periods = [];
+  activeLeftSeries.value.forEach((item) => {
+    if (item.aggregation === "yearly") periods.push(...item.meta.periods);
+  });
+
   if (isGabung.value && activeStaticDataset.value && staticPeriod.value === "yearly") {
     periods.push(...staticSeriesMeta.value.periods);
   }
+
   return dedupePeriods(periods);
 });
 
@@ -929,6 +1148,10 @@ const buildDatasetStyle = ({
   yAxisID = "y",
   xAxisID = "xMonthly",
   isStatic = false,
+  grouped = true,
+  maxBarThickness = 34,
+  categoryPercentage = 0.72,
+  barPercentage = 0.82,
 }) => {
   if (chartType === "bar") {
     return {
@@ -938,10 +1161,10 @@ const buildDatasetStyle = ({
       borderWidth: 2,
       borderRadius: 4,
       borderSkipped: false,
-      maxBarThickness: 34,
-      categoryPercentage: 0.72,
-      barPercentage: 0.82,
-      grouped: true,
+      maxBarThickness,
+      categoryPercentage,
+      barPercentage,
+      grouped,
       yAxisID,
       xAxisID,
       isStatic,
@@ -1104,6 +1327,7 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
         const m = parsePeriod(mPeriod);
         if (
           m.type === "monthly" &&
+          q.type === "quarterly" &&
           m.year === q.year &&
           m.quarter === q.quarter
         ) {
@@ -1116,12 +1340,13 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
       });
     });
 
-    monthSlots.forEach((slot, idx) => {
-      const stackColor = getDatasetStackColor({
-        datasetId,
-        slot,
-        mode: "month",
-      });
+monthSlots.forEach((slot, idx) => {
+const stackColor = getDatasetStackColor({
+  datasetId,
+  slot,
+  mode: "month",
+  datasetOrderMap: activeDatasetOrderMap.value,
+});
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - ${monthNamesShort[idx]}`,
@@ -1135,6 +1360,10 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
           yAxisID: "y",
           xAxisID: "xQuarterlyMerge",
           isStatic: false,
+          grouped: false,
+          maxBarThickness: 56,
+          categoryPercentage: 0.95,
+          barPercentage: 0.98,
         }),
         stack: `${datasetId}-detail`,
         order: 10 + seriesIdx,
@@ -1168,12 +1397,13 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
       yAxisID: "y1",
       xAxisID: "xQuarterlyMerge",
       isStatic: true,
+      grouped: false,
+      maxBarThickness: 56,
+      categoryPercentage: 0.95,
+      barPercentage: 0.98,
     }),
     stack: "grand-total",
     order: 999,
-    maxBarThickness: 42,
-    categoryPercentage: 0.9,
-    barPercentage: 0.95,
   });
 
   return { labels, datasets };
@@ -1181,7 +1411,7 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
 
 const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
   const yearlyMeta = getSeriesMeta(staticDataset, "yearly");
-  const yearPeriods = yearlyMeta.periods ?? [];
+  const yearPeriods = (yearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
   const yearTotals = yearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
@@ -1217,7 +1447,11 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
 
       monthlyPeriods.forEach((mPeriod, mIndex) => {
         const m = parsePeriod(mPeriod);
-        if (m.type === "monthly" && m.year === y.year) {
+        if (
+          m.type === "monthly" &&
+          y.type === "yearly" &&
+          m.year === y.year
+        ) {
           monthlySlotMap[m.month][targetIndex] = {
             x: targetKey,
             y: monthlyValues[mIndex] ?? null,
@@ -1227,11 +1461,12 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
     });
 
     monthSlots.forEach((slot) => {
-      const stackColor = getDatasetStackColor({
-        datasetId,
-        slot,
-        mode: "month",
-      });
+const stackColor = getDatasetStackColor({
+  datasetId,
+  slot,
+  mode: "month",
+  datasetOrderMap: activeDatasetOrderMap.value,
+});
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - ${monthNames[slot - 1]}`,
@@ -1245,6 +1480,10 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
           yAxisID: "y",
           xAxisID: "xYearlyMerge",
           isStatic: false,
+          grouped: false,
+          maxBarThickness: 56,
+          categoryPercentage: 0.95,
+          barPercentage: 0.98,
         }),
         stack: `${datasetId}-detail`,
         order: 10 + seriesIdx,
@@ -1278,12 +1517,13 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
       yAxisID: "y1",
       xAxisID: "xYearlyMerge",
       isStatic: true,
+      grouped: false,
+      maxBarThickness: 56,
+      categoryPercentage: 0.95,
+      barPercentage: 0.98,
     }),
     stack: "grand-total",
     order: 999,
-    maxBarThickness: 48,
-    categoryPercentage: 0.9,
-    barPercentage: 0.95,
   });
 
   return { labels, datasets };
@@ -1291,7 +1531,7 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
 
 const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
   const yearlyMeta = getSeriesMeta(yearlyDataset, "yearly");
-  const yearPeriods = yearlyMeta.periods ?? [];
+  const yearPeriods = (yearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
   const yearTotals = yearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
@@ -1330,7 +1570,11 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
 
       quarterPeriods.forEach((qPeriod, qIndex) => {
         const q = parsePeriod(qPeriod);
-        if (q.type === "quarterly" && q.year === y.year) {
+        if (
+          q.type === "quarterly" &&
+          y.type === "yearly" &&
+          q.year === y.year
+        ) {
           quarterSlotMap[q.quarter][targetIndex] = {
             x: targetKey,
             y: quarterValues[qIndex] ?? null,
@@ -1340,11 +1584,12 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
     });
 
     quarterSlots.forEach((slot) => {
-      const stackColor = getDatasetStackColor({
-        datasetId,
-        slot,
-        mode: "quarter",
-      });
+const stackColor = getDatasetStackColor({
+  datasetId,
+  slot,
+  mode: "quarter",
+  datasetOrderMap: activeDatasetOrderMap.value,
+});
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - Q${slot}`,
@@ -1358,6 +1603,10 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
           yAxisID: "y",
           xAxisID: "xYearlyMerge",
           isStatic: false,
+          grouped: false,
+          maxBarThickness: 56,
+          categoryPercentage: 0.95,
+          barPercentage: 0.98,
         }),
         stack: `${datasetId}-detail`,
         order: 10 + seriesIdx,
@@ -1391,12 +1640,13 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
       yAxisID: "y1",
       xAxisID: "xYearlyMerge",
       isStatic: true,
+      grouped: false,
+      maxBarThickness: 56,
+      categoryPercentage: 0.95,
+      barPercentage: 0.98,
     }),
     stack: "grand-total",
     order: 999,
-    maxBarThickness: 48,
-    categoryPercentage: 0.9,
-    barPercentage: 0.95,
   });
 
   return { labels, datasets };
@@ -1404,8 +1654,8 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
 
 const chartDataL = computed(() => {
   const staticDs = activeStaticDataset.value;
-  const leftSeries = compatibleLeftSeries.value;
-
+  const leftSeries = activeLeftSeries.value;
+  
   if (
     isGabung.value &&
     staticDs &&
@@ -1437,7 +1687,7 @@ const chartDataL = computed(() => {
     }
   }
 
-  const dyn = leftPreparedDynamicSeries.value.map((item) => {
+  const dyn = activeLeftSeries.value.map((item) => {
     const tooltipMeta = createDatasetTooltipMeta({
       periods: item.meta.periods,
       sourceAggregation: item.aggregation,
@@ -1659,11 +1909,21 @@ const onToggleGabung = async () => {
   isMerging.value = false;
 };
 
-const leftAxisVisibility = computed(() => ({
-  monthly: !useStackPeriodMerge.value && hasMonthlySeriesLeft.value,
-  quarterly: !useStackPeriodMerge.value && hasQuarterlySeriesLeft.value,
-  yearly: !useStackPeriodMerge.value && hasYearlySeriesLeft.value,
-}));
+const leftAxisVisibility = computed(() => {
+  if (useStackPeriodMerge.value) {
+    return {
+      monthly: false,
+      quarterly: false,
+      yearly: false,
+    };
+  }
+
+  return {
+    monthly: hasMonthlySeriesLeft.value,
+    quarterly: hasQuarterlySeriesLeft.value,
+    yearly: hasYearlySeriesLeft.value,
+  };
+});
 
 const rightAxisVisibility = computed(() => ({
   monthly: false,
@@ -1928,6 +2188,54 @@ const buildChartOptions = (chartTypeRef, isRightChart = false) =>
 
 const chartOptionsL = buildChartOptions(dynamicChartType, false);
 const chartOptionsR = buildChartOptions(staticChartType, true);
+
+const leftChartKey = computed(() => {
+  const datasetId = primaryDataset.value?.id ?? "no-dataset";
+  const seriesSignature = activeLeftSeries.value
+    .map((item) => {
+      return [
+        item.dataset.id,
+        item.aggregation,
+        item.meta?.periods?.[0] ?? "",
+        item.meta?.periods?.length ?? 0,
+      ].join(":");
+    })
+    .join(",");
+
+  return [
+    "left",
+    datasetId,
+    primaryMeasure.value ?? "",
+    primaryAggregation.value ?? "",
+    primaryMethod.value ?? "",
+    dynamicChartType.value ?? "",
+    staticChartType.value ?? "",
+    staticMeasure.value ?? "",
+    staticPeriod.value ?? "",
+    staticMethod.value ?? "",
+    combineBarMode.value ?? "",
+    useStackPeriodMerge.value ? "stack-period" : "normal",
+    isGabung.value ? "gabung" : "single",
+    activeStaticDataset.value?.id ?? "no-static",
+    staticSeriesMeta.value?.periods?.[0] ?? "",
+    staticSeriesMeta.value?.periods?.length ?? 0,
+    seriesSignature,
+  ].join("|");
+});
+
+const rightChartKey = computed(() => {
+  const datasetId = activeStaticDataset.value?.id ?? staticComponent.value ?? "no-static";
+  return [
+    "right",
+    datasetId,
+    staticMeasure.value ?? "",
+    staticPeriod.value ?? "",
+    staticMethod.value ?? "",
+    staticChartType.value ?? "",
+    staticSeriesMeta.value?.periods?.[0] ?? "",
+    staticSeriesMeta.value?.periods?.length ?? 0,
+  ].join("|");
+});
 </script>
 
 <template>
@@ -2018,15 +2326,16 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
                 </div>
 
                 <div v-if="showPrimaryAggregationFilter">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Pilih Frekuensi</label>
+                  <label class="block text-[12px] mb-1 theme-text-muted">Pilih Periode</label>
                   <select
                     class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
                     :value="primaryAggregation ?? ''"
                     @change="onPrimaryAggregationChange"
                   >
-                    <option value="" disabled>Pilih frekuensi</option>
+                    <option value="" disabled>Pilih periode</option>
                     <option value="monthly" :disabled="isPrimaryMonthlyDisabled">Bulanan</option>
                     <option value="quarterly" :disabled="isPrimaryQuarterlyDisabled">Triwulanan</option>
+                    <option value="yearly" :disabled="isPrimaryYearlyDisabled">Tahunan</option>
                   </select>
                 </div>
 
@@ -2101,6 +2410,7 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
             </div>
 
             <Chart
+              :key="leftChartKey"
               :type="dynamicChartType"
               :data="chartDataL"
               :options="chartOptionsL"
@@ -2129,7 +2439,7 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
               <div class="mb-3 rounded-lg border p-3 theme-filter-panel">
                 <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
                   <div>
-                    <label class="block text-[12px] mb-1 theme-text-muted">Komponen PKRT</label>
+                    <label class="block text-[12px] mb-1 theme-text-muted">Komponen</label>
                     <select
                       class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
                       v-model="staticComponent"
@@ -2146,7 +2456,23 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
                   </div>
 
                   <div v-if="showStaticPeriodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Periode Chart Statistik</label>
+                    <label class="block text-[12px] mb-1 theme-text-muted">Pilih Tampilan</label>
+                    <select
+                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      v-model="staticMeasure"
+                    >
+                      <option
+                        v-for="opt in FILTER_OPTIONS.measure"
+                        :key="opt.value"
+                        :value="opt.value"
+                      >
+                        {{ opt.label }}
+                      </option>
+                    </select>
+                  </div>
+
+                  <div v-if="showStaticPeriodFilter">
+                    <label class="block text-[12px] mb-1 theme-text-muted">Pilih Periode</label>
                     <select
                       class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
                       v-model="staticPeriod"
@@ -2163,24 +2489,8 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
                     </select>
                   </div>
 
-                  <div v-if="showStaticPeriodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Tampilan Chart Kanan</label>
-                    <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
-                      v-model="staticMeasure"
-                    >
-                      <option
-                        v-for="opt in FILTER_OPTIONS.measure"
-                        :key="opt.value"
-                        :value="opt.value"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-
                   <div v-if="showStaticMethodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Metode Triwulan</label>
+                    <label class="block text-[12px] mb-1 theme-text-muted">Metode</label>
                     <select
                       class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
                       v-model="staticMethod"
@@ -2215,6 +2525,7 @@ const chartOptionsR = buildChartOptions(staticChartType, true);
               </div>
 
               <Chart
+                :key="rightChartKey"
                 :type="staticChartType"
                 :data="chartDataR"
                 :options="chartOptionsR"
