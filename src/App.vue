@@ -584,7 +584,7 @@ const DATASET_COLOR_FAMILIES = [
   ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"], // merah
   ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"], // hijau
   ["#EA580C", "#F97316", "#FB923C", "#FDBA74", "#FFEDD5"], // oranye
-  ["#BE185D", "#DB2777", "#EC4899", "#F9A8D4", "#FCE7F3"], // pink
+  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"] // yellow
 ];
 
 const hexToRgb = (hex) => {
@@ -2266,9 +2266,9 @@ const rightChartKey = computed(() => {
       </div>
     </div>
 
-    <div class="flex-8 h-full overflow-hidden">
-      <div class="p-4 h-full overflow-auto">
-        <Button
+<div class="flex-8 h-full overflow-hidden">
+  <div class="p-4 h-full overflow-auto">
+    <Button
           :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
           :outlined="!isGabung"
           rounded
