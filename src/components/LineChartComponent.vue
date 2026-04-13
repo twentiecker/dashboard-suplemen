@@ -1,98 +1,128 @@
 <script setup>
-import { ref, onMounted } from "vue";
-
-onMounted(() => {
-  chartData.value = setChartData();
-  chartOptions.value = setChartOptions();
-});
+import { computed } from "vue";
+import { useChartStore } from "../stores/useChartStore";
 
 const props = defineProps({
   datasets: Object,
 });
 
-const chartData = ref();
-const chartOptions = ref();
+const chartStore = useChartStore();
+const config = computed(() => chartStore.getCompareConfig(props.datasets));
 
-const setChartData = () => {
-  const documentStyle = getComputedStyle(document.documentElement);
-  const dataLength = props.datasets.data.length;
-  const borderColor =
-    props.datasets.data[dataLength - 1] - props.datasets.data[dataLength - 2] <
-    0
-      ? "#EF4444"
-      : "#22C55E";
-  const backgroundColor =
-    props.datasets.data[dataLength - 1] - props.datasets.data[dataLength - 2] <
-    0
-      ? "rgba(239, 68, 68, 0.2)"
-      : "rgba(34, 197, 94, 0.2)";
+const getSeriesByConfig = (dataset, cfg) => {
+  const measure = cfg?.measure ?? "nilai";
+  const aggregation =
+    cfg?.aggregation ??
+    (dataset.rawFrequency === "monthly"
+      ? "monthly"
+      : dataset.rawFrequency === "quarterly"
+        ? "quarterly"
+        : "yearly");
 
-  const datasets = [
-    {
-      ...props.datasets,
-      fill: false,
-      borderColor,
-      backgroundColor,
-    },
-  ];
+  const method =
+    cfg?.method ??
+    (aggregation === "monthly"
+      ? "mtom"
+      : aggregation === "quarterly"
+        ? "qtoq"
+        : "annual");
+
+  if (measure === "nilai") {
+    return dataset?.series?.[aggregation] ?? [];
+  }
+
+  if (aggregation === "yearly") {
+    return dataset?.growth?.yearly?.data ?? [];
+  }
+
+  return dataset?.growth?.[aggregation]?.[method]?.data ?? [];
+};
+
+const preparedSeries = computed(() => getSeriesByConfig(props.datasets, config.value));
+
+const getLastTwoNonNull = (arr = []) => {
+  const valid = arr.filter((v) => v !== null && v !== undefined);
+  if (!valid.length) return { prev: null, last: null };
+  if (valid.length === 1) return { prev: null, last: valid[0] };
 
   return {
-    labels: ["January", "February", "March", "April", "May", "June", "July"],
-    datasets,
+    prev: valid[valid.length - 2],
+    last: valid[valid.length - 1],
   };
 };
-const setChartOptions = () => {
-  const documentStyle = getComputedStyle(document.documentElement);
-  const textColor = documentStyle.getPropertyValue("--p-text-color");
-  const textColorSecondary = documentStyle.getPropertyValue(
-    "--p-text-muted-color",
-  );
-  const surfaceBorder = documentStyle.getPropertyValue(
-    "--p-content-border-color",
-  );
+
+const isDown = computed(() => {
+  const { prev, last } = getLastTwoNonNull(preparedSeries.value ?? []);
+  if (prev === null || prev === undefined || last === null || last === undefined) return false;
+  return Number(last) < Number(prev);
+});
+
+const chartData = computed(() => {
+  const borderColor = isDown.value ? "#EF4444" : "#22C55E";
+  const series = preparedSeries.value ?? [];
 
   return {
-    responsive: true,
-    maintainAspectRatio: false,
-    aspectRatio: 0.6,
-    events: [], // 🔥 disable semua mouse event
-    plugins: {
-      legend: {
-        display: false,
-        labels: {
-          color: textColor,
-        },
+    labels: series.map((_, i) => i + 1),
+    datasets: [
+      {
+        label: props.datasets?.indicatorName ?? "",
+        data: series,
+        fill: false,
+        borderColor,
+        backgroundColor: "transparent",
+        borderWidth: 2,
+        tension: 0,
+        pointRadius: 0,
+        pointHoverRadius: 0,
+        pointHitRadius: 0,
+        spanGaps: true,
       },
-    },
-    scales: {
-      x: {
-        display: false,
-        ticks: {
-          color: textColorSecondary,
-        },
-        grid: {
-          color: surfaceBorder,
-        },
-      },
-      y: {
-        display: false,
-        ticks: {
-          color: textColorSecondary,
-        },
-        grid: {
-          color: surfaceBorder,
-        },
-      },
-    },
+    ],
   };
-};
+});
+
+const chartOptions = computed(() => ({
+  responsive: true,
+  maintainAspectRatio: false,
+  events: [],
+  layout: { padding: 0 },
+  plugins: {
+    legend: { display: false },
+    tooltip: { enabled: false },
+  },
+  scales: {
+    x: {
+      display: false,
+      grid: { display: false, drawBorder: false },
+      ticks: { display: false },
+      border: { display: false },
+    },
+    y: {
+      display: false,
+      grid: { display: false, drawBorder: false },
+      ticks: { display: false },
+      border: { display: false },
+    },
+  },
+  animation: false,
+}));
 </script>
 
 <template>
-  <Chart
-    type="line"
-    :data="chartData"
-    :options="chartOptions"
-    class="h-full w-full"
-  />
+  <div class="w-full h-full">
+    <Chart
+      type="line"
+      :data="chartData"
+      :options="chartOptions"
+      class="w-full h-full block"
+    />
+  </div>
 </template>
+
+<style scoped>
+:deep(canvas) {
+  width: 100% !important;
+  height: 100% !important;
+  display: block !important;
+}
+</style>
