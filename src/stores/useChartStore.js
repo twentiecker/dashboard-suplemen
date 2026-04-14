@@ -42,6 +42,24 @@ const getSupportedAggregations = (dataset) => {
   };
 };
 
+const getPreferredAggregation = (dataset) => {
+  const supported = getSupportedAggregations(dataset);
+
+  if (supported.monthly) return "monthly";
+  if (supported.quarterly) return "quarterly";
+  return "yearly";
+};
+
+const buildDefaultConfigForDataset = (dataset, measure = "nilai") => {
+  const aggregation = getPreferredAggregation(dataset);
+
+  return {
+    measure,
+    aggregation,
+    method: getDefaultMethodByAggregation(aggregation),
+  };
+};
+
 const adaptConfigToDataset = (dataset, sourceConfig = {}) => {
   const supported = getSupportedAggregations(dataset);
 
@@ -125,26 +143,32 @@ export const useChartStore = defineStore("chart", {
     initPrimary(dataset) {
       this.ensureConfig(dataset);
       this.selectedDataset = [dataset];
+      this.applyConfig(dataset, buildDefaultConfigForDataset(dataset, "nilai"));
       this.expandedFilterIds = [];
     },
 
     setPrimary(dataset) {
       this.ensureConfig(dataset);
 
+      const id = String(dataset.id);
+      const defaultConfig = buildDefaultConfigForDataset(dataset, "nilai");
+
       const existsIdx = this.selectedDataset.findIndex(
-        (d) => String(d.id) === String(dataset.id)
+        (d) => String(d.id) === id
       );
 
       if (existsIdx !== -1) {
         const picked = this.selectedDataset.splice(existsIdx, 1)[0];
         this.selectedDataset.unshift(picked);
+        this.applyConfig(id, defaultConfig);
         this.expandedFilterIds = this.expandedFilterIds.filter(
-          (id) => id !== String(dataset.id)
+          (itemId) => itemId !== id
         );
         return;
       }
 
       this.selectedDataset = [dataset];
+      this.applyConfig(id, defaultConfig);
       this.expandedFilterIds = [];
     },
 
@@ -154,6 +178,7 @@ export const useChartStore = defineStore("chart", {
 
       if (this.selectedDataset.length === 0) {
         this.selectedDataset = [dataset];
+        this.applyConfig(id, buildDefaultConfigForDataset(dataset, "nilai"));
         this.expandedFilterIds = [];
         return;
       }
@@ -165,11 +190,15 @@ export const useChartStore = defineStore("chart", {
       const primaryDataset = this.selectedDataset[0] ?? null;
       if (primaryDataset) {
         const primaryConfig = this.getCompareConfig(primaryDataset);
-        const inheritedConfig = adaptConfigToDataset(dataset, primaryConfig);
+        const fallbackPrimaryConfig =
+          primaryConfig?.measure && primaryConfig?.aggregation
+            ? primaryConfig
+            : buildDefaultConfigForDataset(primaryDataset, "nilai");
 
-        if (inheritedConfig.measure || inheritedConfig.aggregation || inheritedConfig.method) {
-          this.applyConfig(dataset, inheritedConfig);
-        }
+        const inheritedConfig = adaptConfigToDataset(dataset, fallbackPrimaryConfig);
+        this.applyConfig(dataset, inheritedConfig);
+      } else {
+        this.applyConfig(dataset, buildDefaultConfigForDataset(dataset, "nilai"));
       }
 
       this.selectedDataset.push(dataset);
@@ -201,9 +230,12 @@ export const useChartStore = defineStore("chart", {
       const id = String(datasetId);
       this.ensureConfig(id);
 
+      const dataset = this.selectedDataset.find((item) => String(item.id) === id);
+      const aggregation = getPreferredAggregation(dataset);
+
       this.compareConfigs[id].measure = measure;
-      this.compareConfigs[id].aggregation = null;
-      this.compareConfigs[id].method = null;
+      this.compareConfigs[id].aggregation = aggregation;
+      this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
     },
 
     setAggregation(datasetId, aggregation) {

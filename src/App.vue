@@ -3,10 +3,9 @@ import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useChartStore } from "./stores/useChartStore";
 import CardComponent from "./components/CardComponent.vue";
 import {
-  fetchPkrtIndicators,
-  buildDatasetFromApi,
-  fetchPdbIndicators,
-  buildPdbDatasetFromApi,
+  fetchIndicatorsBySource,
+  buildDynamicDatasetFromApi,
+  buildPdbStaticDatasetFromComponent,
 } from "./services/pkrtAPI";
 
 const isGabung = ref(false);
@@ -34,12 +33,12 @@ const snapshotPieces = ref([]);
 const cards = ref([]);
 const isLoadingCards = ref(false);
 
-const pkrtIndicatorOptions = ref([]);
 const pdbIndicatorOptions = ref([]);
+const activeSource = ref("");
 const activeStaticDatasetRef = ref(null);
 
-const pkrtDatasetCache = new Map();
-const pdbDatasetCache = new Map();
+const dynamicDatasetCache = new Map();
+const staticDatasetCache = new Map();
 
 const FILTER_OPTIONS = {
   measure: [
@@ -405,73 +404,152 @@ const mapWithConcurrency = async (items, mapper, limit = 4) => {
   return results;
 };
 
-const getCachedPkrtDataset = async (item) => {
-  const key = String(item.kode);
-  if (pkrtDatasetCache.has(key)) return pkrtDatasetCache.get(key);
+/**
+ * =========================================================
+ * PDB component -> source mapper
+ * =========================================================
+ */
+const extractLeadingMarker = (text = "") => {
+  return String(text).trim().match(/^([0-9]+\.|[a-zA-Z]\.)/)?.[1] ?? "";
+};
 
-  const dataset = await buildDatasetFromApi({
+const resolveHeaderSource = (headerText = "") => {
+  const text = String(headerText).trim();
+
+  // Sudah ada indikator dinamisnya
+  if (/^1\./i.test(text)) return "pkrt";
+  if (/^3\./i.test(text)) return "pkp";
+  if (/^4\./i.test(text)) return "pmtb";
+  if (/^6\./i.test(text)) return "eksim";
+  if (/^7\./i.test(text)) return "eksim";
+
+  // Belum ada indikator dinamisnya -> kosongkan chart kiri/cards dulu
+  if (/^2\./i.test(text)) return ""; // Pengeluaran Konsumsi LNPRT
+  if (/^8\./i.test(text)) return ""; // Diskrepansi Statistik
+  if (/^9\./i.test(text)) return ""; // Produk Domestik Bruto
+
+  return "";
+};
+
+const buildPdbComponentMappings = (items = []) => {
+  let currentHeaderText = "";
+  let currentHeaderSource = "";
+
+  return items.map((item) => {
+    const deskripsi = String(item?.deskripsi ?? "").trim();
+    const marker = extractLeadingMarker(deskripsi);
+    const isHeader = /^\d+\.$/.test(marker);
+    const isSub = /^[a-zA-Z]\.$/.test(marker);
+
+    if (isHeader) {
+      currentHeaderText = deskripsi;
+      currentHeaderSource = resolveHeaderSource(deskripsi);
+
+      return {
+        ...item,
+        marker,
+        isHeader: true,
+        isSub: false,
+        parentHeaderText: deskripsi,
+        mappedSource: currentHeaderSource,
+      };
+    }
+
+    if (isSub) {
+      return {
+        ...item,
+        marker,
+        isHeader: false,
+        isSub: true,
+        parentHeaderText: currentHeaderText,
+        mappedSource: currentHeaderSource,
+      };
+    }
+
+    return {
+      ...item,
+      marker,
+      isHeader: false,
+      isSub: false,
+      parentHeaderText: currentHeaderText,
+      mappedSource: currentHeaderSource,
+    };
+  });
+};
+
+const getDynamicCacheKey = ({ source, kode }) =>
+  `${String(source).toLowerCase()}-${String(kode)}`;
+
+const getStaticCacheKey = ({ source, kode }) =>
+  `${String(source).toLowerCase()}-${String(kode)}`;
+
+const getCachedDynamicDataset = async (item) => {
+  const key = getDynamicCacheKey({
+    source: item.source,
+    kode: item.kode,
+  });
+
+  if (dynamicDatasetCache.has(key)) return dynamicDatasetCache.get(key);
+
+  const dataset = await buildDynamicDatasetFromApi({
+    source: item.source,
     kode: item.kode,
     deskripsi: item.deskripsi,
   });
 
   if (dataset) {
-    pkrtDatasetCache.set(key, dataset);
+    dynamicDatasetCache.set(key, dataset);
   }
 
   return dataset;
 };
 
-const getCachedPdbDataset = async ({ kode, deskripsi, measure }) => {
-  const key = `${kode}-${measure}`;
-  if (pdbDatasetCache.has(key)) return pdbDatasetCache.get(key);
+const getCachedStaticDataset = async ({ kode, deskripsi, measure }) => {
+  const key = `pdb-static-${String(kode)}-${String(measure)}`;
 
-  const dataset = await buildPdbDatasetFromApi({
+  if (staticDatasetCache.has(key)) return staticDatasetCache.get(key);
+
+  const dataset = await buildPdbStaticDatasetFromComponent({
     kode,
     deskripsi,
     measure,
   });
 
   if (dataset) {
-    pdbDatasetCache.set(key, dataset);
+    staticDatasetCache.set(key, dataset);
   }
 
   return dataset;
 };
 
-const loadCardsFromApi = async () => {
+const staticComponentOptions = computed(() =>
+  pdbIndicatorOptions.value.map((item) => ({
+    label: `${item.kode} - ${item.deskripsi}`,
+    value: String(item.kode),
+  }))
+);
+
+const activeStaticIndicator = computed(() =>
+  pdbIndicatorOptions.value.find(
+    (item) => String(item.kode) === String(staticComponent.value)
+  ) ?? null
+);
+
+const activeStaticDataset = computed(() => activeStaticDatasetRef.value ?? null);
+
+const activeMappedSource = computed(() =>
+  String(activeStaticIndicator.value?.mappedSource ?? "")
+);
+
+const loadPdbComponentOptions = async () => {
   try {
-    isLoadingCards.value = true;
+    const indikatorPdb = await fetchIndicatorsBySource("pdb");
+    const mapped = buildPdbComponentMappings(indikatorPdb);
+    pdbIndicatorOptions.value = mapped;
 
-    const indikator = await fetchPkrtIndicators();
-    pkrtIndicatorOptions.value = indikator;
-
-    const datasets = await mapWithConcurrency(
-      indikator,
-      async (item) => await getCachedPkrtDataset(item),
-      3
-    );
-
-    const validDatasets = datasets.filter((item) => item && item.id);
-    cards.value = validDatasets;
-
-    if (validDatasets.length) {
-      chartStore.initPrimary(validDatasets[0]);
-    }
-  } catch (err) {
-    console.error("Gagal load PKRT data", err);
-    cards.value = [];
-  } finally {
-    isLoadingCards.value = false;
-  }
-};
-
-const loadPdbIndicatorOptions = async () => {
-  try {
-    const indikator = await fetchPdbIndicators();
-    pdbIndicatorOptions.value = indikator;
-
-    if (!staticComponent.value && indikator.length) {
-      staticComponent.value = String(indikator[0].kode);
+    if (!staticComponent.value && mapped.length) {
+      const firstReady = mapped.find((item) => !!item.mappedSource);
+      staticComponent.value = firstReady ? String(firstReady.kode) : String(mapped[0].kode);
     }
   } catch (err) {
     console.error("Gagal load indikator PDB", err);
@@ -480,61 +558,148 @@ const loadPdbIndicatorOptions = async () => {
   }
 };
 
-const loadActiveStaticDataset = async () => {
+const loadCardsFromMappedSource = async () => {
   try {
-    if (!staticComponent.value) {
-      activeStaticDatasetRef.value = null;
+    isLoadingCards.value = true;
+
+    const source = activeMappedSource.value;
+
+    if (!source) {
+      cards.value = [];
+      activeSource.value = "";
+      chartStore.selectedDataset = [];
       return;
     }
 
-    const found = pdbIndicatorOptions.value.find(
-      (item) => String(item.kode) === String(staticComponent.value)
+    activeSource.value = source;
+
+    const indikator = await fetchIndicatorsBySource(source);
+
+    const datasets = await mapWithConcurrency(
+      indikator.map((item) => ({
+        ...item,
+        source,
+      })),
+      async (item) => await getCachedDynamicDataset(item),
+      3
     );
 
-    if (!found) {
+    const validDatasets = datasets.filter((item) => item && item.id);
+    cards.value = validDatasets;
+
+    if (validDatasets.length) {
+      chartStore.initPrimary(validDatasets[0]);
+
+      // default chart dinamis:
+      // tampilan = nilai
+      // periode = monthly kalau tersedia, kalau tidak quarterly, lalu yearly
+      const first = validDatasets[0];
+      chartStore.setMeasure(first.id, "nilai");
+
+      if (
+        String(first?.apiFreqPrefix ?? first?.apiCode ?? "")
+          .charAt(0)
+          .toUpperCase() !== "Q" &&
+        first.rawFrequency === "monthly"
+      ) {
+        chartStore.setAggregation(first.id, "monthly");
+      } else if (
+        first.rawFrequency === "monthly" ||
+        first.rawFrequency === "quarterly"
+      ) {
+        chartStore.setAggregation(first.id, "quarterly");
+      } else {
+        chartStore.setAggregation(first.id, "yearly");
+      }
+    } else {
+      cards.value = [];
+      chartStore.selectedDataset = [];
+    }
+  } catch (err) {
+    console.error("Gagal load data source terpilih", err);
+    cards.value = [];
+    activeSource.value = "";
+    chartStore.selectedDataset = [];
+  } finally {
+    isLoadingCards.value = false;
+  }
+};
+
+const loadActiveStaticDataset = async () => {
+  try {
+    if (!staticComponent.value || !activeStaticIndicator.value) {
       activeStaticDatasetRef.value = null;
       return;
     }
 
-    const dataset = await getCachedPdbDataset({
-      kode: found.kode,
-      deskripsi: found.deskripsi,
+    const dataset = await getCachedStaticDataset({
+      kode: activeStaticIndicator.value.kode,
+      deskripsi: activeStaticIndicator.value.deskripsi,
       measure: staticMeasure.value,
     });
 
     activeStaticDatasetRef.value = dataset ?? null;
   } catch (err) {
-    console.error("Gagal load dataset PDB aktif", err);
+    console.error("Gagal load dataset statis aktif", err);
     activeStaticDatasetRef.value = null;
   }
 };
 
+const reloadBySelectedComponent = async () => {
+  chartStore.clearAllCompareConfigs();
+
+  // default chart statis
+  staticMeasure.value = "nilai";
+
+  await loadCardsFromMappedSource();
+  await loadActiveStaticDataset();
+
+  if (activeStaticDatasetRef.value) {
+    if ((activeStaticDatasetRef.value?.derivedPeriods?.quarterly?.length ?? 0) > 0) {
+      staticPeriod.value = "quarterly";
+      staticMethod.value = "qtoq";
+    } else {
+      staticPeriod.value = "yearly";
+      staticMethod.value = "annual";
+    }
+  } else {
+    staticPeriod.value = "quarterly";
+    staticMethod.value = "qtoq";
+  }
+};
+
 onMounted(async () => {
-  await Promise.all([
-    loadCardsFromApi(),
-    loadPdbIndicatorOptions(),
-  ]);
-
-  await loadActiveStaticDataset();
+  await loadPdbComponentOptions();
+  await reloadBySelectedComponent();
 });
 
-watch(staticMeasure, async () => {
-  await loadActiveStaticDataset();
-});
-
-watch(staticComponent, async (val) => {
+watch(staticComponent, async (val, oldVal) => {
   if (!val) {
     staticPeriod.value = "";
     staticMethod.value = "";
     activeStaticDatasetRef.value = null;
+    cards.value = [];
+    activeSource.value = "";
     return;
   }
+
+watch(staticMeasure, async () => {
+  if (staticPeriod.value === "quarterly") {
+    staticMethod.value = "qtoq";
+  } else if (staticPeriod.value === "yearly") {
+    staticMethod.value = "annual";
+  }
+
+  await loadActiveStaticDataset();
+});
+
+  if (val === oldVal) return;
 
   if (!staticPeriod.value) {
     staticPeriod.value = "quarterly";
   }
 
-  await loadActiveStaticDataset();
+  await reloadBySelectedComponent();
 });
 
 watch(staticPeriod, (val) => {
@@ -544,7 +709,7 @@ watch(staticPeriod, (val) => {
   }
 
   if (val === "quarterly") {
-    if (!staticMethod.value) staticMethod.value = "qtoq";
+    staticMethod.value = "qtoq";
     return;
   }
 
@@ -580,11 +745,11 @@ const palette = [
 ];
 
 const DATASET_COLOR_FAMILIES = [
-  ["#2563EB", "#3B82F6", "#60A5FA", "#93C5FD", "#BFDBFE"], // biru
   ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"], // merah
+  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"], // yellow
   ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"], // hijau
-  ["#EA580C", "#F97316", "#FB923C", "#FDBA74", "#FFEDD5"], // oranye
-  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"] // yellow
+  ["#1E3A8A", "#2563EB", "#3B82F6", "#93C5FD", "#DBEAFE"], // blue
+  ["#6B21A8", "#7C3AED", "#8B5CF6", "#C4B5FD", "#EDE9FE"], // purple
 ];
 
 const hexToRgb = (hex) => {
@@ -651,15 +816,6 @@ const TOTAL_BAR_COLOR = {
   fill: "rgba(20, 184, 166, 0.35)",
 };
 
-const staticComponentOptions = computed(() =>
-  pdbIndicatorOptions.value.map((item) => ({
-    label: `${item.kode} - ${item.deskripsi}`,
-    value: String(item.kode),
-  }))
-);
-
-const activeStaticDataset = computed(() => activeStaticDatasetRef.value ?? null);
-
 const staticSeriesMeta = computed(() => {
   if (!activeStaticDataset.value || !staticPeriod.value) {
     return { data: [], periods: [], aggregation: "quarterly" };
@@ -674,14 +830,10 @@ const staticSeriesMeta = computed(() => {
   const baseMeta = getSeriesMeta(activeStaticDataset.value, aggregation);
 
   if (aggregation === "yearly") {
-    return getBackendGrowthMeta(activeStaticDataset.value, "yearly", "annual", baseMeta.periods);
-  }
-
-  if (staticMethod.value) {
     return getBackendGrowthMeta(
       activeStaticDataset.value,
-      "quarterly",
-      staticMethod.value,
+      "yearly",
+      "annual",
       baseMeta.periods
     );
   }
@@ -689,7 +841,7 @@ const staticSeriesMeta = computed(() => {
   return getBackendGrowthMeta(
     activeStaticDataset.value,
     "quarterly",
-    "qtoq",
+    staticMethod.value || "qtoq",
     baseMeta.periods
   );
 });
@@ -702,13 +854,16 @@ const primaryRawConfig = computed(() => {
   return chartStore.compareConfigs[id] ?? null;
 });
 
-const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? null);
-const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? null);
-const primaryMethod = computed(() => primaryRawConfig.value?.method ?? null);
+const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? "");
+const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? "");
+const primaryMethod = computed(() => primaryRawConfig.value?.method ?? "");
 
-const showPrimaryAggregationFilter = computed(() => !!primaryMeasure.value);
+const showPrimaryAggregationFilter = computed(() =>
+  !!primaryDataset.value && !!primaryMeasure.value
+);
 const showPrimaryMethodFilter = computed(
   () =>
+    !!primaryDataset.value &&
     primaryMeasure.value === "pertumbuhan" &&
     !!primaryAggregation.value &&
     primaryAggregation.value !== "yearly"
@@ -805,9 +960,9 @@ const getAxisLevelCountFromSelections = ({
     }
   });
 
-  if (staticComponent.value && staticPeriodCandidate) {
-    result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
-  }
+if (staticComponent.value && staticPeriodCandidate) {
+  result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
+}
 
   return getAxisLevelCount(result);
 };
@@ -832,7 +987,7 @@ const getAxisLevelCountForCardSelection = ({
     }
   });
 
-  if (staticComponent.value && staticPeriodCandidate) {
+  if (staticComponent.value && staticPeriodCandidate && activeMappedSource.value) {
     result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
   }
 
@@ -1015,7 +1170,7 @@ const compatibleLeftSeries = computed(() =>
     const measure = cfg.measure ?? "nilai";
 
     return (
-      measure === "nilai" &&
+      measure === primaryMeasure.value &&
       item.meta.aggregation === primaryAggregation.value
     );
   })
@@ -1040,28 +1195,6 @@ const activeDatasetOrderMap = computed(() => {
 
   return map;
 });
-
-watch(
-  [primaryMeasure, primaryAggregation, primaryMethod, activeLeftSeries],
-  () => {
-    console.log("primaryMeasure:", primaryMeasure.value);
-    console.log("primaryAggregation:", primaryAggregation.value);
-    console.log("primaryMethod:", primaryMethod.value);
-    console.log(
-      "activeLeftSeries aggregation:",
-      activeLeftSeries.value.map((x) => x.aggregation)
-    );
-    console.log(
-      "activeLeftSeries periods sample:",
-      activeLeftSeries.value[0]?.meta?.periods?.slice(0, 10)
-    );
-    console.log(
-      "activeLeftSeries data sample:",
-      activeLeftSeries.value[0]?.meta?.data?.slice(0, 10)
-    );
-  },
-  { immediate: true, deep: true }
-);
 
 const hasIncompatibleLeftSeries = computed(() =>
   leftPreparedDynamicSeries.value.length !== compatibleLeftSeries.value.length
@@ -1340,13 +1473,13 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
       });
     });
 
-monthSlots.forEach((slot, idx) => {
-const stackColor = getDatasetStackColor({
-  datasetId,
-  slot,
-  mode: "month",
-  datasetOrderMap: activeDatasetOrderMap.value,
-});
+    monthSlots.forEach((slot, idx) => {
+      const stackColor = getDatasetStackColor({
+        datasetId,
+        slot,
+        mode: "month",
+        datasetOrderMap: activeDatasetOrderMap.value,
+      });
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - ${monthNamesShort[idx]}`,
@@ -1461,12 +1594,12 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
     });
 
     monthSlots.forEach((slot) => {
-const stackColor = getDatasetStackColor({
-  datasetId,
-  slot,
-  mode: "month",
-  datasetOrderMap: activeDatasetOrderMap.value,
-});
+      const stackColor = getDatasetStackColor({
+        datasetId,
+        slot,
+        mode: "month",
+        datasetOrderMap: activeDatasetOrderMap.value,
+      });
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - ${monthNames[slot - 1]}`,
@@ -1584,12 +1717,12 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
     });
 
     quarterSlots.forEach((slot) => {
-const stackColor = getDatasetStackColor({
-  datasetId,
-  slot,
-  mode: "quarter",
-  datasetOrderMap: activeDatasetOrderMap.value,
-});
+      const stackColor = getDatasetStackColor({
+        datasetId,
+        slot,
+        mode: "quarter",
+        datasetOrderMap: activeDatasetOrderMap.value,
+      });
 
       datasets.push({
         label: `${seriesItem.dataset.indicatorName} - Q${slot}`,
@@ -1655,7 +1788,7 @@ const stackColor = getDatasetStackColor({
 const chartDataL = computed(() => {
   const staticDs = activeStaticDataset.value;
   const leftSeries = activeLeftSeries.value;
-  
+
   if (
     isGabung.value &&
     staticDs &&
@@ -2205,6 +2338,7 @@ const leftChartKey = computed(() => {
   return [
     "left",
     datasetId,
+    activeMappedSource.value ?? "",
     primaryMeasure.value ?? "",
     primaryAggregation.value ?? "",
     primaryMethod.value ?? "",
@@ -2227,6 +2361,7 @@ const rightChartKey = computed(() => {
   const datasetId = activeStaticDataset.value?.id ?? staticComponent.value ?? "no-static";
   return [
     "right",
+    activeMappedSource.value ?? "",
     datasetId,
     staticMeasure.value ?? "",
     staticPeriod.value ?? "",
@@ -2266,9 +2401,9 @@ const rightChartKey = computed(() => {
       </div>
     </div>
 
-<div class="flex-8 h-full overflow-hidden">
-  <div class="p-4 h-full overflow-auto">
-    <Button
+    <div class="flex-8 h-full overflow-hidden">
+      <div class="p-4 h-full overflow-auto">
+        <Button
           :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
           :outlined="!isGabung"
           rounded
@@ -2522,8 +2657,14 @@ const rightChartKey = computed(() => {
                     </select>
                   </div>
                 </div>
-              </div>
 
+              <p
+                v-if="staticComponent && !activeMappedSource"
+                class="mt-3 text-[12px] text-amber-400"
+              >
+                Komponen ini belum memiliki data indikator untuk chart dinamis, jadi panel kiri dikosongkan sementara. Chart statis tetap menggunakan data PDB.
+              </p>
+              </div>
               <Chart
                 :key="rightChartKey"
                 :type="staticChartType"
