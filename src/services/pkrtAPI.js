@@ -974,28 +974,29 @@ export const buildPdbStaticDatasetFromComponent = async ({
   try {
     const jenis = measure === "nilai" ? "ADHB" : "ADHK";
 
-    const [
-      quarterlyNilai,
-      yearlyNilai,
-      qtoq,
-      yony,
-      ctoc,
-      annual,
-    ] = await Promise.all([
-
-fetchFirstWorkingSeriesFromEndpoints({
-  endpoints: [
-    SOURCE_ENDPOINTS.pdb.quarterChart,
-    SOURCE_ENDPOINTS.pdb.quarter,
-  ],
-  configBuilder: () => ({
-    params: { kode, jenis },
-  }),
-  normalizer: (payload) =>
-    normalizeValuePayload(payload, {
-      quarterPeriodNormalization: true,
+const [
+  quarterlyNilai,
+  yearlyNilai,
+  qtoq,
+  yony,
+  ctoc,
+  annual,
+] = await Promise.all([
+  fetchFirstWorkingSeriesFromEndpoints({
+    endpoints: [
+      SOURCE_ENDPOINTS.pdb.timeseries,
+      SOURCE_ENDPOINTS.pdb.chart,
+      SOURCE_ENDPOINTS.pdb.quarter,
+      SOURCE_ENDPOINTS.pdb.quarterChart,
+    ],
+    configBuilder: () => ({
+      params: { kode, jenis },
     }),
-}),
+    normalizer: (payload) =>
+      normalizeValuePayload(payload, {
+        quarterPeriodNormalization: true,
+      }),
+  }),
 
       fetchFirstWorkingSeriesFromEndpoints({
         endpoints: [

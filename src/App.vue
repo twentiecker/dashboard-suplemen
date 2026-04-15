@@ -46,7 +46,7 @@ const pdbIndicatorOptions = ref([]);
 const activeSource = ref("");
 const activeStaticDatasetRef = ref(null);
 
-const componentRuleMode = ref("eksim");
+const componentRuleMode = ref("pkrt");
 // pilihan: admin | pkrt | pkp | pmtb | eksim
 
 const dynamicDatasetCache = new Map();
@@ -382,6 +382,48 @@ const hasValidSeriesData = (seriesLike) => {
   const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
   return data.some((value) => isFiniteNumber(value));
 };
+
+const hasStaticNilaiQuarterly = computed(() => {
+  const ds = activeStaticDataset.value;
+  if (!ds) return false;
+
+  return (
+    Array.isArray(ds?.derivedPeriods?.quarterly) &&
+    ds.derivedPeriods.quarterly.length > 0 &&
+    Array.isArray(ds?.series?.quarterly) &&
+    ds.series.quarterly.some((value) => isFiniteNumber(value))
+  );
+});
+
+const hasStaticNilaiYearly = computed(() => {
+  const ds = activeStaticDataset.value;
+  if (!ds) return false;
+
+  return (
+    Array.isArray(ds?.derivedPeriods?.yearly) &&
+    ds.derivedPeriods.yearly.length > 0 &&
+    Array.isArray(ds?.series?.yearly) &&
+    ds.series.yearly.some((value) => isFiniteNumber(value))
+  );
+});
+
+const hasStaticGrowthQuarterly = computed(() => {
+  const ds = activeStaticDataset.value;
+  if (!ds) return false;
+
+  return (
+    hasValidSeriesData(ds?.growth?.quarterly?.qtoq) ||
+    hasValidSeriesData(ds?.growth?.quarterly?.yony) ||
+    hasValidSeriesData(ds?.growth?.quarterly?.ctoc)
+  );
+});
+
+const hasStaticGrowthYearly = computed(() => {
+  const ds = activeStaticDataset.value;
+  if (!ds) return false;
+
+  return hasValidSeriesData(ds?.growth?.yearly);
+});
 
 const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
   if (!dataset) return false;
@@ -1315,16 +1357,14 @@ const isPrimaryYearlyDisabled = computed(() => {
 
 const isStaticQuarterlyDisabled = computed(() => {
   if (!staticComponent.value) return true;
+  if (!activeStaticDataset.value) return true;
 
-  if (
-    !datasetHasAggregationData(
-      activeStaticDataset.value,
-      "quarterly",
-      staticMeasure.value
-    )
-  ) {
-    return true;
-  }
+  const hasData =
+    staticMeasure.value === "nilai"
+      ? hasStaticNilaiQuarterly.value
+      : hasStaticGrowthQuarterly.value;
+
+  if (!hasData) return true;
 
   if (!isGabung.value) return false;
 
@@ -1336,16 +1376,14 @@ const isStaticQuarterlyDisabled = computed(() => {
 
 const isStaticYearlyDisabled = computed(() => {
   if (!staticComponent.value) return true;
+  if (!activeStaticDataset.value) return true;
 
-  if (
-    !datasetHasAggregationData(
-      activeStaticDataset.value,
-      "yearly",
-      staticMeasure.value
-    )
-  ) {
-    return true;
-  }
+  const hasData =
+    staticMeasure.value === "nilai"
+      ? hasStaticNilaiYearly.value
+      : hasStaticGrowthYearly.value;
+
+  if (!hasData) return true;
 
   if (!isGabung.value) return false;
 
