@@ -32,10 +32,22 @@ const snapshotPieces = ref([]);
 
 const cards = ref([]);
 const isLoadingCards = ref(false);
+const isPageBusy = ref(false);
+
+const loadingStageText = ref("Menyiapkan visual...");
+const loadingProgressText = ref("Menyelaraskan data dan tampilan");
+const loadingPulseKey = ref(0);
+const loadingPercent = ref(0);
+
+let loadingStageTimer = null;
+let loadingPercentTimer = null;
 
 const pdbIndicatorOptions = ref([]);
 const activeSource = ref("");
 const activeStaticDatasetRef = ref(null);
+
+const componentRuleMode = ref("eksim");
+// pilihan: admin | pkrt | pkp | pmtb | eksim
 
 const dynamicDatasetCache = new Map();
 const staticDatasetCache = new Map();
@@ -75,6 +87,104 @@ const FILTER_OPTIONS = {
 };
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const LOADING_STAGES = [
+  {
+    title: "Mengambil data...",
+    subtitle: "Menghubungkan komponen dengan sumber data",
+  },
+  {
+    title: "Menyusun grafik...",
+    subtitle: "Menyiapkan tampilan chart dinamis dan statis",
+  },
+  {
+    title: "Merapikan tampilan...",
+    subtitle: "Menyelaraskan filter, card, dan visual akhir",
+  },
+];
+
+const startLoadingStageAnimation = () => {
+  let index = 0;
+
+  loadingStageText.value = LOADING_STAGES[0].title;
+  loadingProgressText.value = LOADING_STAGES[0].subtitle;
+  loadingPulseKey.value += 1;
+  loadingPercent.value = 0;
+
+  if (loadingStageTimer) clearInterval(loadingStageTimer);
+  if (loadingPercentTimer) clearInterval(loadingPercentTimer);
+
+  loadingStageTimer = setInterval(() => {
+    index = (index + 1) % LOADING_STAGES.length;
+    loadingStageText.value = LOADING_STAGES[index].title;
+    loadingProgressText.value = LOADING_STAGES[index].subtitle;
+    loadingPulseKey.value += 1;
+  }, 1100);
+
+  loadingPercentTimer = setInterval(() => {
+    const current = loadingPercent.value;
+
+    if (current < 35) {
+      loadingPercent.value += 3;
+      return;
+    }
+
+    if (current < 65) {
+      loadingPercent.value += 2;
+      return;
+    }
+
+    if (current < 88) {
+      loadingPercent.value += 1;
+      return;
+    }
+
+    if (current < 93) {
+      loadingPercent.value += 0.3;
+    }
+  }, 90);
+};
+
+const finishLoadingStageAnimation = async () => {
+  if (loadingPercentTimer) {
+    clearInterval(loadingPercentTimer);
+    loadingPercentTimer = null;
+  }
+
+  while (loadingPercent.value < 100) {
+    loadingPercent.value = Math.min(100, loadingPercent.value + 4);
+    await wait(18);
+  }
+};
+
+const stopLoadingStageAnimation = () => {
+  if (loadingStageTimer) {
+    clearInterval(loadingStageTimer);
+    loadingStageTimer = null;
+  }
+
+  if (loadingPercentTimer) {
+    clearInterval(loadingPercentTimer);
+    loadingPercentTimer = null;
+  }
+};
+
+const waitUntil = async (checker, timeout = 12000, interval = 60) => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeout) {
+    if (checker()) return true;
+    await wait(interval);
+  }
+
+  return false;
+};
+
+const settleUiRender = async () => {
+  await nextTick();
+  await nextTick();
+  await wait(150);
+};
 
 const monthNames = [
   "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -262,6 +372,59 @@ const dedupePeriods = (periods = []) =>
     return pa.order - pb.order;
   });
 
+const isFiniteNumber = (value) =>
+  typeof value === "number" && Number.isFinite(value);
+
+const hasValidArrayData = (arr = []) =>
+  Array.isArray(arr) && arr.some((value) => isFiniteNumber(value));
+
+const hasValidSeriesData = (seriesLike) => {
+  const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
+  return data.some((value) => isFiniteNumber(value));
+};
+
+const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
+  if (!dataset) return false;
+
+  if (measure === "nilai") {
+    if (aggregation === "monthly") {
+      return hasValidArrayData(dataset?.series?.monthly);
+    }
+
+    if (aggregation === "quarterly") {
+      return hasValidArrayData(dataset?.series?.quarterly);
+    }
+
+    if (aggregation === "yearly") {
+      return hasValidArrayData(dataset?.series?.yearly);
+    }
+
+    return false;
+  }
+
+  if (aggregation === "monthly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.ytod)
+    );
+  }
+
+  if (aggregation === "quarterly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.quarterly?.qtoq) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.ctoc)
+    );
+  }
+
+  if (aggregation === "yearly") {
+    return hasValidSeriesData(dataset?.growth?.yearly);
+  }
+
+  return false;
+};
+
 const getSeriesMeta = (dataset, aggregation) => {
   if (aggregation === "monthly") {
     return {
@@ -416,17 +579,15 @@ const extractLeadingMarker = (text = "") => {
 const resolveHeaderSource = (headerText = "") => {
   const text = String(headerText).trim();
 
-  // Sudah ada indikator dinamisnya
   if (/^1\./i.test(text)) return "pkrt";
   if (/^3\./i.test(text)) return "pkp";
   if (/^4\./i.test(text)) return "pmtb";
   if (/^6\./i.test(text)) return "eksim";
   if (/^7\./i.test(text)) return "eksim";
 
-  // Belum ada indikator dinamisnya -> kosongkan chart kiri/cards dulu
-  if (/^2\./i.test(text)) return ""; // Pengeluaran Konsumsi LNPRT
-  if (/^8\./i.test(text)) return ""; // Diskrepansi Statistik
-  if (/^9\./i.test(text)) return ""; // Produk Domestik Bruto
+  if (/^2\./i.test(text)) return "";
+  if (/^8\./i.test(text)) return "";
+  if (/^9\./i.test(text)) return "";
 
   return "";
 };
@@ -477,10 +638,21 @@ const buildPdbComponentMappings = (items = []) => {
   });
 };
 
-const getDynamicCacheKey = ({ source, kode }) =>
-  `${String(source).toLowerCase()}-${String(kode)}`;
+const isAllowedByComponentRule = (item, ruleMode) => {
+  const mode = String(ruleMode ?? "admin").toLowerCase();
 
-const getStaticCacheKey = ({ source, kode }) =>
+  if (mode === "admin") return true;
+
+  const source = String(item?.mappedSource ?? "").toLowerCase();
+
+  if (mode === "eksim") {
+    return source === "eksim";
+  }
+
+  return source === mode;
+};
+
+const getDynamicCacheKey = ({ source, kode }) =>
   `${String(source).toLowerCase()}-${String(kode)}`;
 
 const getCachedDynamicDataset = async (item) => {
@@ -522,15 +694,21 @@ const getCachedStaticDataset = async ({ kode, deskripsi, measure }) => {
   return dataset;
 };
 
+const filteredPdbIndicatorOptions = computed(() =>
+  pdbIndicatorOptions.value.filter((item) =>
+    isAllowedByComponentRule(item, componentRuleMode.value)
+  )
+);
+
 const staticComponentOptions = computed(() =>
-  pdbIndicatorOptions.value.map((item) => ({
+  filteredPdbIndicatorOptions.value.map((item) => ({
     label: `${item.kode} - ${item.deskripsi}`,
     value: String(item.kode),
   }))
 );
 
 const activeStaticIndicator = computed(() =>
-  pdbIndicatorOptions.value.find(
+  filteredPdbIndicatorOptions.value.find(
     (item) => String(item.kode) === String(staticComponent.value)
   ) ?? null
 );
@@ -541,15 +719,96 @@ const activeMappedSource = computed(() =>
   String(activeStaticIndicator.value?.mappedSource ?? "")
 );
 
+const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
+
+const primaryRawConfig = computed(() => {
+  if (!primaryDataset.value) return null;
+  const id = String(primaryDataset.value.id);
+  return chartStore.compareConfigs[id] ?? null;
+});
+
+const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? "");
+const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? "");
+const primaryMethod = computed(() => primaryRawConfig.value?.method ?? "");
+
+const isLeftUiReady = computed(() => {
+  if (!activeMappedSource.value) return true;
+  if (!cards.value.length) return false;
+  if (!primaryDataset.value) return false;
+  if (!primaryMeasure.value) return false;
+  if (!primaryAggregation.value) return false;
+
+  if (
+    primaryMeasure.value === "pertumbuhan" &&
+    primaryAggregation.value !== "yearly" &&
+    !primaryMethod.value
+  ) {
+    return false;
+  }
+
+  return true;
+});
+
+const isRightUiReady = computed(() => {
+  if (!staticComponent.value) return true;
+  if (!activeStaticDataset.value) return false;
+  if (!staticMeasure.value) return false;
+  if (!staticPeriod.value) return false;
+
+  if (
+    staticMeasure.value === "pertumbuhan" &&
+    staticPeriod.value === "quarterly" &&
+    !staticMethod.value
+  ) {
+    return false;
+  }
+
+  return true;
+});
+
+const isPageContentReady = computed(() => {
+  return !isLoadingCards.value && isLeftUiReady.value && isRightUiReady.value;
+});
+
+const withPageBusy = async (fn) => {
+  isPageBusy.value = true;
+  startLoadingStageAnimation();
+
+  try {
+    const result = await fn();
+
+    loadingStageText.value = "Menyelesaikan render...";
+    loadingProgressText.value = "Menunggu semua card dan chart tampil sempurna";
+    loadingPulseKey.value += 1;
+
+    await settleUiRender();
+    await waitUntil(() => isPageContentReady.value, 12000, 60);
+    await settleUiRender();
+
+    await finishLoadingStageAnimation();
+    await wait(220);
+
+    return result;
+  } finally {
+    stopLoadingStageAnimation();
+    isPageBusy.value = false;
+  }
+};
+
 const loadPdbComponentOptions = async () => {
   try {
     const indikatorPdb = await fetchIndicatorsBySource("pdb");
     const mapped = buildPdbComponentMappings(indikatorPdb);
     pdbIndicatorOptions.value = mapped;
 
-    if (!staticComponent.value && mapped.length) {
-      const firstReady = mapped.find((item) => !!item.mappedSource);
-      staticComponent.value = firstReady ? String(firstReady.kode) : String(mapped[0].kode);
+    const filtered = mapped.filter((item) =>
+      isAllowedByComponentRule(item, componentRuleMode.value)
+    );
+
+    if (!staticComponent.value && filtered.length) {
+      staticComponent.value = String(filtered[0].kode);
+    } else if (!filtered.length) {
+      staticComponent.value = "";
     }
   } catch (err) {
     console.error("Gagal load indikator PDB", err);
@@ -568,6 +827,7 @@ const loadCardsFromMappedSource = async () => {
       cards.value = [];
       activeSource.value = "";
       chartStore.selectedDataset = [];
+      await nextTick();
       return;
     }
 
@@ -588,12 +848,9 @@ const loadCardsFromMappedSource = async () => {
     cards.value = validDatasets;
 
     if (validDatasets.length) {
-      chartStore.initPrimary(validDatasets[0]);
-
-      // default chart dinamis:
-      // tampilan = nilai
-      // periode = monthly kalau tersedia, kalau tidak quarterly, lalu yearly
       const first = validDatasets[0];
+
+      chartStore.initPrimary(first);
       chartStore.setMeasure(first.id, "nilai");
 
       if (
@@ -615,12 +872,16 @@ const loadCardsFromMappedSource = async () => {
       cards.value = [];
       chartStore.selectedDataset = [];
     }
+
+    await nextTick();
+    await nextTick();
   } catch (err) {
     console.error("Gagal load data source terpilih", err);
     cards.value = [];
     activeSource.value = "";
     chartStore.selectedDataset = [];
   } finally {
+    await nextTick();
     isLoadingCards.value = false;
   }
 };
@@ -647,8 +908,6 @@ const loadActiveStaticDataset = async () => {
 
 const reloadBySelectedComponent = async () => {
   chartStore.clearAllCompareConfigs();
-
-  // default chart statis
   staticMeasure.value = "nilai";
 
   await loadCardsFromMappedSource();
@@ -666,11 +925,16 @@ const reloadBySelectedComponent = async () => {
     staticPeriod.value = "quarterly";
     staticMethod.value = "qtoq";
   }
+
+  await nextTick();
+  await nextTick();
 };
 
 onMounted(async () => {
-  await loadPdbComponentOptions();
-  await reloadBySelectedComponent();
+  await withPageBusy(async () => {
+    await loadPdbComponentOptions();
+    await reloadBySelectedComponent();
+  });
 });
 
 watch(staticComponent, async (val, oldVal) => {
@@ -683,23 +947,27 @@ watch(staticComponent, async (val, oldVal) => {
     return;
   }
 
-watch(staticMeasure, async () => {
-  if (staticPeriod.value === "quarterly") {
-    staticMethod.value = "qtoq";
-  } else if (staticPeriod.value === "yearly") {
-    staticMethod.value = "annual";
-  }
-
-  await loadActiveStaticDataset();
-});
-
   if (val === oldVal) return;
 
   if (!staticPeriod.value) {
     staticPeriod.value = "quarterly";
   }
 
-  await reloadBySelectedComponent();
+  await withPageBusy(async () => {
+    await reloadBySelectedComponent();
+  });
+});
+
+watch(staticMeasure, async () => {
+  await withPageBusy(async () => {
+    if (staticPeriod.value === "quarterly") {
+      staticMethod.value = "qtoq";
+    } else if (staticPeriod.value === "yearly") {
+      staticMethod.value = "annual";
+    }
+
+    await loadActiveStaticDataset();
+  });
 });
 
 watch(staticPeriod, (val) => {
@@ -715,6 +983,27 @@ watch(staticPeriod, (val) => {
 
   if (val === "yearly") {
     staticMethod.value = "annual";
+  }
+});
+
+watch(componentRuleMode, async () => {
+  const filtered = filteredPdbIndicatorOptions.value;
+
+  if (!filtered.length) {
+    staticComponent.value = "";
+    activeStaticDatasetRef.value = null;
+    cards.value = [];
+    activeSource.value = "";
+    chartStore.selectedDataset = [];
+    return;
+  }
+
+  const stillExists = filtered.some(
+    (item) => String(item.kode) === String(staticComponent.value)
+  );
+
+  if (!stillExists) {
+    staticComponent.value = String(filtered[0].kode);
   }
 });
 
@@ -745,11 +1034,11 @@ const palette = [
 ];
 
 const DATASET_COLOR_FAMILIES = [
-  ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"], // merah
-  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"], // yellow
-  ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"], // hijau
-  ["#1E3A8A", "#2563EB", "#3B82F6", "#93C5FD", "#DBEAFE"], // blue
-  ["#6B21A8", "#7C3AED", "#8B5CF6", "#C4B5FD", "#EDE9FE"], // purple
+  ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"],
+  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"],
+  ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"],
+  ["#1E3A8A", "#2563EB", "#3B82F6", "#93C5FD", "#DBEAFE"],
+  ["#6B21A8", "#7C3AED", "#8B5CF6", "#C4B5FD", "#EDE9FE"],
 ];
 
 const hexToRgb = (hex) => {
@@ -846,21 +1135,10 @@ const staticSeriesMeta = computed(() => {
   );
 });
 
-const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
-
-const primaryRawConfig = computed(() => {
-  if (!primaryDataset.value) return null;
-  const id = String(primaryDataset.value.id);
-  return chartStore.compareConfigs[id] ?? null;
-});
-
-const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? "");
-const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? "");
-const primaryMethod = computed(() => primaryRawConfig.value?.method ?? "");
-
 const showPrimaryAggregationFilter = computed(() =>
   !!primaryDataset.value && !!primaryMeasure.value
 );
+
 const showPrimaryMethodFilter = computed(
   () =>
     !!primaryDataset.value &&
@@ -869,24 +1147,29 @@ const showPrimaryMethodFilter = computed(
     primaryAggregation.value !== "yearly"
 );
 
-const primaryApiPrefix = computed(() =>
-  String(primaryDataset.value?.apiFreqPrefix ?? primaryDataset.value?.apiCode ?? "")
-    .charAt(0)
-    .toUpperCase()
+const canChoosePrimaryMonthly = computed(() =>
+  datasetHasAggregationData(
+    primaryDataset.value,
+    "monthly",
+    primaryMeasure.value || "nilai"
+  )
 );
-
-const canChoosePrimaryMonthly = computed(() => {
-  if (!primaryDataset.value) return false;
-  if (primaryApiPrefix.value === "Q") return false;
-  return primaryDataset.value.rawFrequency === "monthly";
-});
 
 const canChoosePrimaryQuarterly = computed(() =>
-  primaryDataset.value?.rawFrequency === "monthly" ||
-  primaryDataset.value?.rawFrequency === "quarterly"
+  datasetHasAggregationData(
+    primaryDataset.value,
+    "quarterly",
+    primaryMeasure.value || "nilai"
+  )
 );
 
-const canChoosePrimaryYearly = computed(() => !!primaryDataset.value);
+const canChoosePrimaryYearly = computed(() =>
+  datasetHasAggregationData(
+    primaryDataset.value,
+    "yearly",
+    primaryMeasure.value || "nilai"
+  )
+);
 
 const onPrimaryMeasureChange = (e) => {
   if (!primaryDataset.value) return;
@@ -960,9 +1243,9 @@ const getAxisLevelCountFromSelections = ({
     }
   });
 
-if (staticComponent.value && staticPeriodCandidate) {
-  result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
-}
+  if (staticComponent.value && staticPeriodCandidate) {
+    result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
+  }
 
   return getAxisLevelCount(result);
 };
@@ -1031,8 +1314,19 @@ const isPrimaryYearlyDisabled = computed(() => {
 });
 
 const isStaticQuarterlyDisabled = computed(() => {
+  if (!staticComponent.value) return true;
+
+  if (
+    !datasetHasAggregationData(
+      activeStaticDataset.value,
+      "quarterly",
+      staticMeasure.value
+    )
+  ) {
+    return true;
+  }
+
   if (!isGabung.value) return false;
-  if (!staticComponent.value) return false;
 
   return getAxisLevelCountFromSelections({
     primaryAggregationCandidate: primaryAggregation.value,
@@ -1041,8 +1335,19 @@ const isStaticQuarterlyDisabled = computed(() => {
 });
 
 const isStaticYearlyDisabled = computed(() => {
+  if (!staticComponent.value) return true;
+
+  if (
+    !datasetHasAggregationData(
+      activeStaticDataset.value,
+      "yearly",
+      staticMeasure.value
+    )
+  ) {
+    return true;
+  }
+
   if (!isGabung.value) return false;
-  if (!staticComponent.value) return false;
 
   return getAxisLevelCountFromSelections({
     primaryAggregationCandidate: primaryAggregation.value,
@@ -1052,8 +1357,11 @@ const isStaticYearlyDisabled = computed(() => {
 
 const isCardMonthlyDisabled = (card) => {
   if (!card) return true;
-  if (String(card?.apiFreqPrefix ?? card?.apiCode ?? "").charAt(0).toUpperCase() === "Q") return true;
-  if (card.rawFrequency !== "monthly") return true;
+
+  const cardConfig = chartStore.getCompareConfig(card) ?? {};
+  const measure = cardConfig.measure ?? "nilai";
+
+  if (!datasetHasAggregationData(card, "monthly", measure)) return true;
   if (!isGabung.value) return false;
 
   return getAxisLevelCountForCardSelection({
@@ -1064,17 +1372,26 @@ const isCardMonthlyDisabled = (card) => {
 
 const isCardQuarterlyDisabled = (card) => {
   if (!card) return true;
-  const canQuarterly =
-    card.rawFrequency === "monthly" ||
-    card.rawFrequency === "quarterly";
 
-  if (!canQuarterly) return true;
+  const cardConfig = chartStore.getCompareConfig(card) ?? {};
+  const measure = cardConfig.measure ?? "nilai";
+
+  if (!datasetHasAggregationData(card, "quarterly", measure)) return true;
   if (!isGabung.value) return false;
 
   return getAxisLevelCountForCardSelection({
     cardId: card.id,
     aggregationCandidate: "quarterly",
   }) > 2;
+};
+
+const isCardYearlyDisabled = (card) => {
+  if (!card) return true;
+
+  const cardConfig = chartStore.getCompareConfig(card) ?? {};
+  const measure = cardConfig.measure ?? "nilai";
+
+  return !datasetHasAggregationData(card, "yearly", measure);
 };
 
 const isCombineDisabled = computed(() => combineTargetAxisLevels.value > 2);
@@ -2001,7 +2318,7 @@ const buildSnapshotPieces = async () => {
 };
 
 const onToggleGabung = async () => {
-  if (isCombineDisabled.value) return;
+  if (isCombineDisabled.value || isPageBusy.value) return;
 
   if (isGabung.value) {
     isMerging.value = true;
@@ -2374,7 +2691,55 @@ const rightChartKey = computed(() => {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen overflow-hidden">
+  <div class="relative flex h-screen w-screen overflow-hidden">
+    <div
+      v-if="isPageBusy"
+      class="page-loading-overlay"
+    >
+      <div class="page-loading-card">
+        <div class="page-loading-ring-wrap">
+          <div class="page-loading-ring ring-back"></div>
+          <div class="page-loading-ring ring-front"></div>
+          <div class="page-loading-core"></div>
+          <div class="page-loading-percent">
+            {{ Math.round(loadingPercent) }}%
+          </div>
+        </div>
+
+        <Transition name="loading-fade" mode="out-in">
+          <h2
+            :key="`title-${loadingPulseKey}`"
+            class="page-loading-title"
+          >
+            {{ loadingStageText }}
+          </h2>
+        </Transition>
+
+        <Transition name="loading-fade" mode="out-in">
+          <p
+            :key="`subtitle-${loadingPulseKey}`"
+            class="page-loading-text"
+          >
+            {{ loadingProgressText }}
+          </p>
+        </Transition>
+
+        <div class="page-loading-bar">
+          <span
+            class="page-loading-bar-fill"
+            :style="{ width: `${Math.round(loadingPercent)}%` }"
+          ></span>
+          <span class="page-loading-bar-glow"></span>
+        </div>
+
+        <div class="page-loading-dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </div>
+
     <div
       v-if="snapshotPiecesVisible"
       class="snapshot-piece-layer"
@@ -2402,12 +2767,12 @@ const rightChartKey = computed(() => {
     </div>
 
     <div class="flex-8 h-full overflow-hidden">
-      <div class="p-4 h-full overflow-auto">
+      <div class="h-full overflow-auto p-4">
         <Button
           :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
           :outlined="!isGabung"
           rounded
-          :disabled="isCombineDisabled"
+          :disabled="isCombineDisabled || isPageBusy"
           @click="onToggleGabung"
         />
 
@@ -2419,7 +2784,7 @@ const rightChartKey = computed(() => {
         </p>
 
         <div
-          class="charts-shell flex gap-3 mt-3 items-start"
+          class="charts-shell mt-3 flex items-start gap-3"
           :class="{ merging: isMerging, merged: isGabung }"
         >
           <div
@@ -2435,19 +2800,20 @@ const rightChartKey = computed(() => {
 
           <div
             ref="leftPanelRef"
-            class="left-chart-panel flex-1 min-w-0"
+            class="left-chart-panel min-w-0 flex-1"
             :class="{
               'merge-absorb': isMerging && mergePhase === 'absorb'
             }"
           >
-            <div class="mb-3 rounded-lg border p-3 theme-filter-panel">
-              <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <div class="theme-filter-panel mb-3 rounded-lg border p-3">
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
                 <div>
-                  <label class="block text-[12px] mb-1 theme-text-muted">Pilih Tampilan</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Pilih Tampilan</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     :value="primaryMeasure ?? ''"
                     @change="onPrimaryMeasureChange"
+                    :disabled="isPageBusy"
                   >
                     <option value="" disabled>Pilih tampilan</option>
                     <option
@@ -2461,11 +2827,12 @@ const rightChartKey = computed(() => {
                 </div>
 
                 <div v-if="showPrimaryAggregationFilter">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Pilih Periode</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Pilih Periode</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     :value="primaryAggregation ?? ''"
                     @change="onPrimaryAggregationChange"
+                    :disabled="isPageBusy"
                   >
                     <option value="" disabled>Pilih periode</option>
                     <option value="monthly" :disabled="isPrimaryMonthlyDisabled">Bulanan</option>
@@ -2475,11 +2842,12 @@ const rightChartKey = computed(() => {
                 </div>
 
                 <div v-if="showPrimaryMethodFilter && primaryAggregation === 'monthly'">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Metode Bulanan</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Metode Bulanan</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     :value="primaryMethod ?? ''"
                     @change="onPrimaryMethodChange"
+                    :disabled="isPageBusy"
                   >
                     <option value="" disabled>Pilih metode</option>
                     <option
@@ -2493,11 +2861,12 @@ const rightChartKey = computed(() => {
                 </div>
 
                 <div v-if="showPrimaryMethodFilter && primaryAggregation === 'quarterly'">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Metode Triwulanan</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Metode Triwulanan</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     :value="primaryMethod ?? ''"
                     @change="onPrimaryMethodChange"
+                    :disabled="isPageBusy"
                   >
                     <option value="" disabled>Pilih metode</option>
                     <option
@@ -2511,10 +2880,11 @@ const rightChartKey = computed(() => {
                 </div>
 
                 <div v-show="showDynamicChartTypeFilter">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Tipe Chart Dinamis</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Tipe Chart Dinamis</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     v-model="dynamicChartType"
+                    :disabled="isPageBusy"
                   >
                     <option
                       v-for="opt in FILTER_OPTIONS.chartTypes"
@@ -2527,10 +2897,11 @@ const rightChartKey = computed(() => {
                 </div>
 
                 <div v-show="showStackBarFilter && showCombineBarModeFilter">
-                  <label class="block text-[12px] mb-1 theme-text-muted">Mode Bar Gabungan</label>
+                  <label class="theme-text-muted mb-1 block text-[12px]">Mode Bar Gabungan</label>
                   <select
-                    class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                     v-model="combineBarMode"
+                    :disabled="isPageBusy"
                   >
                     <option
                       v-for="opt in FILTER_OPTIONS.combineBarModes"
@@ -2550,7 +2921,7 @@ const rightChartKey = computed(() => {
               :data="chartDataL"
               :options="chartOptionsL"
               :plugins="[valueLabelPlugin]"
-              class="h-120 chart-left-dynamic"
+              class="chart-left-dynamic h-120"
             />
           </div>
 
@@ -2558,7 +2929,7 @@ const rightChartKey = computed(() => {
             <div
               v-if="!isGabung"
               ref="rightPanelRef"
-              class="right-chart-panel flex-1 basis-1/2 min-w-0"
+              class="right-chart-panel min-w-0 basis-1/2 flex-1"
               :class="{
                 'merge-lift': isMerging && mergePhase === 'lift',
                 'merge-freeze': isMerging && mergePhase === 'freeze',
@@ -2571,13 +2942,14 @@ const rightChartKey = computed(() => {
                 aria-hidden="true"
               ></div>
 
-              <div class="mb-3 rounded-lg border p-3 theme-filter-panel">
-                <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div class="theme-filter-panel mb-3 rounded-lg border p-3">
+                <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
                   <div>
-                    <label class="block text-[12px] mb-1 theme-text-muted">Komponen</label>
+                    <label class="theme-text-muted mb-1 block text-[12px]">Komponen</label>
                     <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                       v-model="staticComponent"
+                      :disabled="isPageBusy"
                     >
                       <option value="" disabled>Pilih komponen</option>
                       <option
@@ -2591,10 +2963,11 @@ const rightChartKey = computed(() => {
                   </div>
 
                   <div v-if="showStaticPeriodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Pilih Tampilan</label>
+                    <label class="theme-text-muted mb-1 block text-[12px]">Pilih Tampilan</label>
                     <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                       v-model="staticMeasure"
+                      :disabled="isPageBusy"
                     >
                       <option
                         v-for="opt in FILTER_OPTIONS.measure"
@@ -2607,10 +2980,11 @@ const rightChartKey = computed(() => {
                   </div>
 
                   <div v-if="showStaticPeriodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Pilih Periode</label>
+                    <label class="theme-text-muted mb-1 block text-[12px]">Pilih Periode</label>
                     <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                       v-model="staticPeriod"
+                      :disabled="isPageBusy"
                     >
                       <option value="" disabled>Pilih periode</option>
                       <option
@@ -2625,10 +2999,11 @@ const rightChartKey = computed(() => {
                   </div>
 
                   <div v-if="showStaticMethodFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Metode</label>
+                    <label class="theme-text-muted mb-1 block text-[12px]">Metode</label>
                     <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                       v-model="staticMethod"
+                      :disabled="isPageBusy"
                     >
                       <option value="" disabled>Pilih metode</option>
                       <option
@@ -2642,10 +3017,11 @@ const rightChartKey = computed(() => {
                   </div>
 
                   <div v-show="showStaticChartTypeFilter">
-                    <label class="block text-[12px] mb-1 theme-text-muted">Tipe Chart Statistik</label>
+                    <label class="theme-text-muted mb-1 block text-[12px]">Tipe Chart Statistik</label>
                     <select
-                      class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
                       v-model="staticChartType"
+                      :disabled="isPageBusy"
                     >
                       <option
                         v-for="opt in FILTER_OPTIONS.chartTypes"
@@ -2658,13 +3034,14 @@ const rightChartKey = computed(() => {
                   </div>
                 </div>
 
-              <p
-                v-if="staticComponent && !activeMappedSource"
-                class="mt-3 text-[12px] text-amber-400"
-              >
-                Komponen ini belum memiliki data indikator untuk chart dinamis, jadi panel kiri dikosongkan sementara. Chart statis tetap menggunakan data PDB.
-              </p>
+                <p
+                  v-if="staticComponent && !activeMappedSource"
+                  class="mt-3 text-[12px] text-amber-400"
+                >
+                  Komponen ini belum memiliki data indikator untuk chart dinamis, jadi panel kiri dikosongkan sementara. Chart statis tetap menggunakan data PDB.
+                </p>
               </div>
+
               <Chart
                 :key="rightChartKey"
                 :type="staticChartType"
@@ -3013,5 +3390,315 @@ const rightChartKey = computed(() => {
       rotate(var(--rot));
     filter: blur(6px) brightness(1.18);
   }
+}
+
+.page-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(20, 184, 166, 0.10), transparent 30%),
+    radial-gradient(circle at 80% 25%, rgba(59, 130, 246, 0.10), transparent 28%),
+    radial-gradient(circle at 50% 80%, rgba(168, 85, 247, 0.08), transparent 30%),
+    rgba(2, 6, 23, 0.78);
+  backdrop-filter: blur(14px) saturate(1.08);
+  pointer-events: all;
+}
+
+.page-loading-bg-orb {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(24px);
+  opacity: 0.55;
+  animation: orbFloat 6s ease-in-out infinite;
+}
+
+.page-loading-bg-orb.orb-1 {
+  width: 180px;
+  height: 180px;
+  background: rgba(20, 184, 166, 0.16);
+  top: 18%;
+  left: 28%;
+}
+
+.page-loading-bg-orb.orb-2 {
+  width: 220px;
+  height: 220px;
+  background: rgba(59, 130, 246, 0.14);
+  right: 26%;
+  top: 24%;
+  animation-delay: 1.2s;
+}
+
+.page-loading-bg-orb.orb-3 {
+  width: 160px;
+  height: 160px;
+  background: rgba(168, 85, 247, 0.14);
+  bottom: 18%;
+  left: 46%;
+  animation-delay: 2.1s;
+}
+
+.page-loading-card {
+  position: relative;
+  min-width: 340px;
+  max-width: 420px;
+  padding: 30px 28px 24px;
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(3, 7, 18, 0.96));
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(255,255,255,0.03) inset,
+    0 0 50px rgba(20, 184, 166, 0.08);
+  text-align: center;
+  overflow: hidden;
+}
+
+.page-loading-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      120deg,
+      transparent 0%,
+      rgba(255,255,255,0.04) 22%,
+      transparent 42%
+    );
+  transform: translateX(-120%);
+  animation: loadingShine 2.6s linear infinite;
+  pointer-events: none;
+}
+
+.page-loading-ring-wrap {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  margin: 0 auto 18px;
+}
+
+.page-loading-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+}
+
+.page-loading-ring.ring-back {
+  border: 3px solid rgba(148, 163, 184, 0.12);
+}
+
+.page-loading-ring.ring-front {
+  border: 3px solid transparent;
+  border-top-color: #14b8a6;
+  border-right-color: #3b82f6;
+  animation: luxurySpin 1.1s linear infinite;
+  box-shadow: 0 0 24px rgba(20, 184, 166, 0.22);
+}
+
+.page-loading-core {
+  position: absolute;
+  inset: 16px;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, rgba(20,184,166,0.32), rgba(59,130,246,0.08) 68%, transparent 100%);
+  animation: corePulse 1.8s ease-in-out infinite;
+}
+
+.page-loading-title {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: 0.01em;
+}
+
+.page-loading-text {
+  margin: 10px 0 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #94a3b8;
+}
+
+.page-loading-bar {
+  position: relative;
+  width: 100%;
+  height: 7px;
+  margin-top: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.page-loading-bar-glow {
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(20, 184, 166, 0),
+    rgba(20, 184, 166, 0.9),
+    rgba(59, 130, 246, 0.95),
+    rgba(59, 130, 246, 0)
+  );
+  box-shadow:
+    0 0 14px rgba(20,184,166,0.45),
+    0 0 18px rgba(59,130,246,0.28);
+  animation: loadingBarRun 1.4s ease-in-out infinite;
+}
+
+.page-loading-dots {
+  margin-top: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.page-loading-dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.75);
+  animation: loadingDotPulse 1.2s ease-in-out infinite;
+}
+
+.page-loading-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.page-loading-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.loading-fade-enter-active,
+.loading-fade-leave-active {
+  transition: opacity 0.28s ease, transform 0.28s ease;
+}
+
+.loading-fade-enter-from,
+.loading-fade-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+@keyframes luxurySpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes corePulse {
+  0%, 100% {
+    transform: scale(0.92);
+    opacity: 0.72;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes loadingBarRun {
+  0% {
+    left: -42%;
+  }
+  100% {
+    left: 102%;
+  }
+}
+
+@keyframes loadingDotPulse {
+  0%, 100% {
+    transform: translateY(0);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+@keyframes orbFloat {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-14px) scale(1.06);
+  }
+}
+
+@keyframes loadingShine {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(160%);
+  }
+}
+
+.page-loading-percent {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 12px rgba(20, 184, 166, 0.22);
+}
+
+.page-loading-bar {
+  position: relative;
+  width: 100%;
+  height: 7px;
+  margin-top: 18px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.12);
+}
+
+.page-loading-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(20, 184, 166, 0.95),
+    rgba(59, 130, 246, 0.95)
+  );
+  box-shadow:
+    0 0 16px rgba(20, 184, 166, 0.28),
+    0 0 20px rgba(59, 130, 246, 0.18);
+  transition: width 0.18s ease-out;
+}
+
+.page-loading-bar-glow {
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    rgba(255,255,255,0),
+    rgba(255,255,255,0.75),
+    rgba(255,255,255,0)
+  );
+  mix-blend-mode: screen;
+  animation: loadingBarRun 1.4s ease-in-out infinite;
 }
 </style>

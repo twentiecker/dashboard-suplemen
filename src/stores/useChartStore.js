@@ -29,48 +29,106 @@ const cloneConfig = (config = {}) => ({
   method: config?.method ?? null,
 });
 
-const getSupportedAggregations = (dataset) => {
-  const rawFrequency = dataset?.rawFrequency ?? "unknown";
-  const apiPrefix = String(dataset?.apiFreqPrefix ?? dataset?.apiCode ?? "")
-    .charAt(0)
-    .toUpperCase();
+const isFiniteNumber = (value) =>
+  typeof value === "number" && Number.isFinite(value);
 
+const hasValidSeriesData = (seriesLike) => {
+  const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
+  return data.some((value) => isFiniteNumber(value));
+};
+
+const hasValidArrayData = (arr = []) =>
+  Array.isArray(arr) && arr.some((value) => isFiniteNumber(value));
+
+const hasAggregationData = (dataset, aggregation, measure = "nilai") => {
+  if (!dataset) return false;
+
+  if (measure === "nilai") {
+    if (aggregation === "monthly") {
+      return hasValidArrayData(dataset?.series?.monthly);
+    }
+
+    if (aggregation === "quarterly") {
+      return hasValidArrayData(dataset?.series?.quarterly);
+    }
+
+    if (aggregation === "yearly") {
+      return hasValidArrayData(dataset?.series?.yearly);
+    }
+
+    return false;
+  }
+
+  // pertumbuhan
+  if (aggregation === "monthly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.ytod)
+    );
+  }
+
+  if (aggregation === "quarterly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.quarterly?.qtoq) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.ctoc)
+    );
+  }
+
+  if (aggregation === "yearly") {
+    return hasValidSeriesData(dataset?.growth?.yearly);
+  }
+
+  return false;
+};
+
+const getSupportedAggregations = (dataset, measure = "nilai") => {
   return {
-    monthly: apiPrefix !== "Q" && rawFrequency === "monthly",
-    quarterly: rawFrequency === "monthly" || rawFrequency === "quarterly",
-    yearly: true,
+    monthly: hasAggregationData(dataset, "monthly", measure),
+    quarterly: hasAggregationData(dataset, "quarterly", measure),
+    yearly: hasAggregationData(dataset, "yearly", measure),
   };
 };
 
-const getPreferredAggregation = (dataset) => {
-  const supported = getSupportedAggregations(dataset);
+const getPreferredAggregation = (dataset, measure = "nilai") => {
+  const supported = getSupportedAggregations(dataset, measure);
 
   if (supported.monthly) return "monthly";
   if (supported.quarterly) return "quarterly";
-  return "yearly";
+  if (supported.yearly) return "yearly";
+  return null;
 };
 
 const buildDefaultConfigForDataset = (dataset, measure = "nilai") => {
-  const aggregation = getPreferredAggregation(dataset);
+  const aggregation = getPreferredAggregation(dataset, measure);
 
   return {
     measure,
     aggregation,
-    method: getDefaultMethodByAggregation(aggregation),
+    method: aggregation ? getDefaultMethodByAggregation(aggregation) : null,
   };
 };
 
 const adaptConfigToDataset = (dataset, sourceConfig = {}) => {
-  const supported = getSupportedAggregations(dataset);
+  const measure = sourceConfig?.measure ?? "nilai";
+  const supported = getSupportedAggregations(dataset, measure);
 
-  const measure = sourceConfig?.measure ?? null;
   let aggregation = sourceConfig?.aggregation ?? null;
   let method = sourceConfig?.method ?? null;
 
   if (aggregation === "monthly" && !supported.monthly) {
-    aggregation = supported.quarterly ? "quarterly" : "yearly";
+    aggregation = supported.quarterly
+      ? "quarterly"
+      : supported.yearly
+        ? "yearly"
+        : null;
   } else if (aggregation === "quarterly" && !supported.quarterly) {
-    aggregation = "yearly";
+    aggregation = supported.monthly
+      ? "monthly"
+      : supported.yearly
+        ? "yearly"
+        : null;
   } else if (aggregation === "yearly" && !supported.yearly) {
     aggregation = supported.quarterly
       ? "quarterly"
@@ -79,13 +137,11 @@ const adaptConfigToDataset = (dataset, sourceConfig = {}) => {
         : null;
   }
 
-  if (measure === "nilai") {
-    method = aggregation ? getDefaultMethodByAggregation(aggregation) : null;
-  } else if (measure === "pertumbuhan") {
-    method = aggregation ? getDefaultMethodByAggregation(aggregation) : null;
-  } else {
-    method = null;
+  if (!aggregation) {
+    aggregation = getPreferredAggregation(dataset, measure);
   }
+
+  method = aggregation ? getDefaultMethodByAggregation(aggregation) : null;
 
   return {
     measure,
@@ -172,6 +228,17 @@ export const useChartStore = defineStore("chart", {
       this.expandedFilterIds = [];
     },
 
+    showOnly(dataset) {
+  this.ensureConfig(dataset);
+
+  const id = String(dataset.id);
+  const defaultConfig = buildDefaultConfigForDataset(dataset, "nilai");
+
+  this.selectedDataset = [dataset];
+  this.applyConfig(id, defaultConfig);
+  this.expandedFilterIds = [];
+},
+
     addCompare(dataset) {
       this.ensureConfig(dataset);
       const id = String(dataset.id);
@@ -226,25 +293,33 @@ export const useChartStore = defineStore("chart", {
       }
     },
 
-    setMeasure(datasetId, measure) {
-      const id = String(datasetId);
-      this.ensureConfig(id);
+setMeasure(datasetId, measure) {
+  const id = String(datasetId);
+  this.ensureConfig(id);
 
-      const dataset = this.selectedDataset.find((item) => String(item.id) === id);
-      const aggregation = getPreferredAggregation(dataset);
+  const dataset = this.selectedDataset.find((item) => String(item.id) === id);
+  const aggregation = getPreferredAggregation(dataset, measure);
 
-      this.compareConfigs[id].measure = measure;
-      this.compareConfigs[id].aggregation = aggregation;
-      this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
-    },
+  this.compareConfigs[id].measure = measure;
+  this.compareConfigs[id].aggregation = aggregation;
+  this.compareConfigs[id].method = aggregation
+    ? getDefaultMethodByAggregation(aggregation)
+    : null;
+},
 
-    setAggregation(datasetId, aggregation) {
-      const id = String(datasetId);
-      this.ensureConfig(id);
+setAggregation(datasetId, aggregation) {
+  const id = String(datasetId);
+  this.ensureConfig(id);
 
-      this.compareConfigs[id].aggregation = aggregation;
-      this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
-    },
+  const dataset = this.selectedDataset.find((item) => String(item.id) === id);
+  const measure = this.compareConfigs[id]?.measure ?? "nilai";
+  const supported = getSupportedAggregations(dataset, measure);
+
+  if (!supported?.[aggregation]) return;
+
+  this.compareConfigs[id].aggregation = aggregation;
+  this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
+},
 
     setMethod(datasetId, method) {
       const id = String(datasetId);

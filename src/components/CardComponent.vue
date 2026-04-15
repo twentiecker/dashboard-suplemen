@@ -35,6 +35,49 @@ const FILTER_OPTIONS = {
 };
 
 const config = computed(() => chartStore.getCompareConfig(props.datasets));
+const isFiniteNumber = (value) =>
+  typeof value === "number" && Number.isFinite(value);
+
+const hasValidArrayData = (arr = []) =>
+  Array.isArray(arr) && arr.some((value) => isFiniteNumber(value));
+
+const hasValidSeriesData = (seriesLike) => {
+  const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
+  return data.some((value) => isFiniteNumber(value));
+};
+
+const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
+  if (!dataset) return false;
+
+  if (measure === "nilai") {
+    if (aggregation === "monthly") return hasValidArrayData(dataset?.series?.monthly);
+    if (aggregation === "quarterly") return hasValidArrayData(dataset?.series?.quarterly);
+    if (aggregation === "yearly") return hasValidArrayData(dataset?.series?.yearly);
+    return false;
+  }
+
+  if (aggregation === "monthly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.ytod)
+    );
+  }
+
+  if (aggregation === "quarterly") {
+    return (
+      hasValidSeriesData(dataset?.growth?.quarterly?.qtoq) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.quarterly?.ctoc)
+    );
+  }
+
+  if (aggregation === "yearly") {
+    return hasValidSeriesData(dataset?.growth?.yearly);
+  }
+
+  return false;
+};
 
 const getSeriesByConfig = (dataset, cfg) => {
   const measure = cfg?.measure ?? "nilai";
@@ -122,23 +165,29 @@ const isPrimary = computed(() => chartStore.primaryId === props.datasets.id);
 const isDisabled = computed(() => chartStore.isLocked && !isSelected.value);
 const isExpanded = computed(() => chartStore.isExpanded(props.datasets.id));
 
-const apiPrefix = computed(() =>
-  String(props.datasets?.apiFreqPrefix ?? props.datasets?.apiCode ?? "")
-    .charAt(0)
-    .toUpperCase()
+const canChooseMonthly = computed(() =>
+  datasetHasAggregationData(
+    props.datasets,
+    "monthly",
+    config.value?.measure ?? "nilai"
+  )
 );
-
-const canChooseMonthly = computed(() => {
-  if (apiPrefix.value === "Q") return false;
-  return props.datasets.rawFrequency === "monthly";
-});
 
 const canChooseQuarterly = computed(() =>
-  props.datasets.rawFrequency === "monthly" ||
-  props.datasets.rawFrequency === "quarterly"
+  datasetHasAggregationData(
+    props.datasets,
+    "quarterly",
+    config.value?.measure ?? "nilai"
+  )
 );
 
-const canChooseYearly = computed(() => true);
+const canChooseYearly = computed(() =>
+  datasetHasAggregationData(
+    props.datasets,
+    "yearly",
+    config.value?.measure ?? "nilai"
+  )
+);
 
 const isCardMonthlyDisabled = computed(() => {
   if (!canChooseMonthly.value) return true;
@@ -151,6 +200,8 @@ const isCardQuarterlyDisabled = computed(() => {
   if (!props.isGabung) return false;
   return props.quarterlyDisabled;
 });
+
+const isCardYearlyDisabled = computed(() => !canChooseYearly.value);
 
 const showAggregationFilter = computed(() => !!config.value.measure);
 const showMethodFilter = computed(
@@ -184,6 +235,9 @@ const onClickCard = () => {
   if (chartStore.selectedDataset.length > 1) {
     const confirmChange = window.confirm("Apakah ingin melihat chart ini saja?");
     if (!confirmChange) return;
+
+    chartStore.showOnly(props.datasets);
+    return;
   }
 
   chartStore.setPrimary(props.datasets);
@@ -305,7 +359,7 @@ const onMethodChange = (e) => {
           <option value="" disabled>Pilih periode</option>
           <option value="monthly" :disabled="isCardMonthlyDisabled">Bulanan</option>
           <option value="quarterly" :disabled="isCardQuarterlyDisabled">Triwulanan</option>
-          <option value="yearly" :disabled="!canChooseYearly">Tahunan</option>
+          <option value="yearly" :disabled="isCardYearlyDisabled">Tahunan</option>
         </select>
 
         <p v-if="!canChooseMonthly" class="text-[11px] mt-1 theme-text-muted">

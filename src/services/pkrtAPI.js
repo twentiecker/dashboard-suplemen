@@ -9,8 +9,6 @@ const api = axios.create({
  * =========================================================
  * SOURCE MAP
  * =========================================================
- * pkrt, pkp, pmtb, eksim -> diperlakukan sebagai source global
- * pdb tetap disediakan kalau nanti mau dipakai
  */
 const SOURCE_ENDPOINTS = {
   pkrt: {
@@ -147,6 +145,58 @@ const getSourceConfig = (source) =>
   SOURCE_ENDPOINTS[String(source ?? "").toLowerCase()] ?? null;
 
 const uniqueTruthy = (items = []) => [...new Set(items.filter(Boolean))];
+
+const getCodePrefix = (kode) =>
+  String(kode ?? "").trim().charAt(0).toUpperCase();
+
+const isQuarterOnlyCode = (kode) => getCodePrefix(kode) === "Q";
+
+/**
+ * =========================================================
+ * REQUEST CACHE
+ * =========================================================
+ * dipakai untuk mencegah request endpoint+params yang sama
+ * ditembak berkali-kali secara paralel / berulang
+ */
+const requestCache = new Map();
+
+const stableStringify = (value) => {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+};
+
+const buildRequestCacheKey = (url, config = {}) => {
+  const params = config?.params ?? {};
+  return `${String(url)}::${stableStringify(params)}`;
+};
+
+const cachedGet = async (url, config = {}) => {
+  const key = buildRequestCacheKey(url, config);
+
+  if (requestCache.has(key)) {
+    return requestCache.get(key);
+  }
+
+  const promise = api.get(url, config);
+
+  requestCache.set(key, promise);
+
+  try {
+    const response = await promise;
+    return response;
+  } catch (error) {
+    requestCache.delete(key);
+    throw error;
+  }
+};
 
 const toNumberOrNull = (value) => {
   if (value === null || value === undefined || value === "") return null;
@@ -499,6 +549,7 @@ const normalizeGrowthPayload = (
       payload.series.find((item) =>
         String(item?.name ?? "").toLowerCase().includes("growth")
       ) ??
+      findValueSeries(payload.series) ??
       null;
 
     return {
@@ -598,7 +649,7 @@ const fetchSingleSeries = async ({
   normalizer,
 }) => {
   const result = await safe(async () => {
-    const { data } = await api.get(endpoint, configBuilder());
+    const { data } = await cachedGet(endpoint, configBuilder());
     return normalizer(data);
   });
 
@@ -612,7 +663,7 @@ const fetchFirstWorkingSeriesFromEndpoints = async ({
 }) => {
   for (const endpoint of uniqueTruthy(endpoints)) {
     const result = await safe(async () => {
-      const { data } = await api.get(endpoint, configBuilder());
+      const { data } = await cachedGet(endpoint, configBuilder());
       return normalizer(data);
     });
 
@@ -631,7 +682,7 @@ const fetchGrowthSeries = async ({
 }) => {
   for (const endpoint of uniqueTruthy(endpoints)) {
     const resultWithType = await safe(async () => {
-      const { data } = await api.get(
+      const { data } = await cachedGet(
         endpoint,
         configBuilder({ type: canonicalType })
       );
@@ -646,7 +697,7 @@ const fetchGrowthSeries = async ({
 
     if (tryWithoutType) {
       const resultWithoutType = await safe(async () => {
-        const { data } = await api.get(endpoint, configBuilder({}));
+        const { data } = await cachedGet(endpoint, configBuilder({}));
         return normalizeGrowthPayload(data, {
           canonicalType,
           quarterPeriodNormalization,
@@ -683,7 +734,9 @@ const generateAcronym = (text = "") => {
 };
 
 const toShortCode = (source, kode, deskripsi) => {
-  const prefix = String(kode ?? "").charAt(0).toUpperCase() || String(source ?? "").toUpperCase();
+  const prefix =
+    String(kode ?? "").charAt(0).toUpperCase() ||
+    String(source ?? "").toUpperCase();
   const acronym = generateAcronym(deskripsi);
   return `${prefix}-${acronym || String(kode ?? "").toUpperCase()}`;
 };
@@ -699,7 +752,7 @@ export const fetchIndicatorsBySource = async (source) => {
 
   if (!config?.indikator) return [];
 
-  const { data } = await api.get(config.indikator);
+  const { data } = await cachedGet(config.indikator);
   if (!Array.isArray(data)) return [];
 
   return data.map((item, index) => ({
@@ -713,6 +766,7 @@ export const fetchIndicatorsBySource = async (source) => {
 const fetchMonthlyNilaiBySource = async (source, kode) => {
   const config = getSourceConfig(source);
   if (!config) return emptySeries();
+  if (isQuarterOnlyCode(kode)) return emptySeries();
 
   return fetchFirstWorkingSeriesFromEndpoints({
     endpoints: [config.timeseries, config.chart],
@@ -728,8 +782,21 @@ const fetchQuarterlyNilaiBySource = async (source, kode) => {
   const config = getSourceConfig(source);
   if (!config) return emptySeries();
 
+  // Prefix Q
+  if (isQuarterOnlyCode(kode)) {
+    return fetchFirstWorkingSeriesFromEndpoints({
+      endpoints: [config.quarterChart, config.quarter],
+      configBuilder: () => getKodeParams(kode),
+      normalizer: (payload) =>
+        normalizeValuePayload(payload, {
+          quarterPeriodNormalization: true,
+        }),
+    });
+  }
+
+  // Prefix M
   return fetchFirstWorkingSeriesFromEndpoints({
-    endpoints: [config.quarterChart, config.quarter, config.chart, config.timeseries],
+    endpoints: [config.quarterChart, config.quarter],
     configBuilder: () => getKodeParams(kode),
     normalizer: (payload) =>
       normalizeValuePayload(payload, {
@@ -754,6 +821,7 @@ const fetchMonthlyGrowthByType = async (source, kode, canonicalType) => {
   const requestType = REQUEST_TYPES.monthly[canonicalType];
 
   if (!config || !requestType) return emptySeries();
+  if (isQuarterOnlyCode(kode)) return emptySeries();
 
   return fetchGrowthSeries({
     endpoints: [config.growthChart],
@@ -798,17 +866,11 @@ const fetchAnnualGrowthBySource = async (source, kode) => {
  * =========================================================
  * DATASET BUILDERS
  * =========================================================
- * buildDynamicDatasetFromApi:
- * untuk cards kiri + chart dinamis
- *
- * buildStaticDatasetFromApi:
- * untuk chart statis kanan
- *
- * Secara struktur sama, hanya dipisah supaya jelas
  */
 const buildGenericDatasetFromApi = async ({ source, kode, deskripsi }) => {
   try {
     const sourceKey = String(source ?? "").toLowerCase();
+    const quarterOnly = isQuarterOnlyCode(kode);
 
     const [
       monthlyNilai,
@@ -825,9 +887,9 @@ const buildGenericDatasetFromApi = async ({ source, kode, deskripsi }) => {
       safe(() => fetchMonthlyNilaiBySource(sourceKey, kode)),
       safe(() => fetchQuarterlyNilaiBySource(sourceKey, kode)),
       safe(() => fetchAnnualNilaiBySource(sourceKey, kode)),
-      safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
-      safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
-      safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
+      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
+      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
+      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
       safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "qtoq")),
       safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "yony")),
       safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "ctoc")),
@@ -880,7 +942,10 @@ const buildGenericDatasetFromApi = async ({ source, kode, deskripsi }) => {
       tension: 0.4,
     };
   } catch (error) {
-    console.error(`Gagal build dataset ${String(source).toUpperCase()} untuk ${kode}`, error);
+    console.error(
+      `Gagal build dataset ${String(source).toUpperCase()} untuk ${kode}`,
+      error
+    );
     return null;
   }
 };
@@ -917,21 +982,20 @@ export const buildPdbStaticDatasetFromComponent = async ({
       ctoc,
       annual,
     ] = await Promise.all([
-      fetchFirstWorkingSeriesFromEndpoints({
-        endpoints: [
-          SOURCE_ENDPOINTS.pdb.chart,
-          SOURCE_ENDPOINTS.pdb.timeseries,
-          SOURCE_ENDPOINTS.pdb.quarterChart,
-          SOURCE_ENDPOINTS.pdb.quarter,
-        ],
-        configBuilder: () => ({
-          params: { kode, jenis },
-        }),
-        normalizer: (payload) =>
-          normalizeValuePayload(payload, {
-            quarterPeriodNormalization: true,
-          }),
-      }),
+
+fetchFirstWorkingSeriesFromEndpoints({
+  endpoints: [
+    SOURCE_ENDPOINTS.pdb.quarterChart,
+    SOURCE_ENDPOINTS.pdb.quarter,
+  ],
+  configBuilder: () => ({
+    params: { kode, jenis },
+  }),
+  normalizer: (payload) =>
+    normalizeValuePayload(payload, {
+      quarterPeriodNormalization: true,
+    }),
+}),
 
       fetchFirstWorkingSeriesFromEndpoints({
         endpoints: [
