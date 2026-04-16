@@ -22,6 +22,47 @@ const dynamicChartType = ref("line");
 const staticChartType = ref("line");
 const combineBarMode = ref("standard");
 
+const selectedProvince = ref("indonesia");
+const selectedRange = ref("8Y");
+
+const provinceOptions = [
+  { label: "INDONESIA", value: "indonesia" },
+  { label: "ACEH", value: "aceh" },
+  { label: "SUMUT", value: "sumut" },
+  { label: "SUMBAR", value: "sumbar" },
+  { label: "RIAU", value: "riau" },
+  { label: "JAMBI", value: "jambi" },
+  { label: "SUMSEL", value: "sumsel" },
+  { label: "BENGKULU", value: "bengkulu" },
+  { label: "LAMPUNG", value: "lampung" },
+  { label: "DKI", value: "dki" },
+  { label: "JABAR", value: "jabar" },
+  { label: "JATENG", value: "jateng" },
+  { label: "DIY", value: "diy" },
+  { label: "JATIM", value: "jatim" },
+  { label: "BANTEN", value: "banten" },
+  { label: "BALI", value: "bali" },
+  { label: "NTB", value: "ntb" },
+  { label: "NTT", value: "ntt" },
+  { label: "KALBAR", value: "kalbar" },
+  { label: "KALTENG", value: "kalteng" },
+  { label: "KALSEL", value: "kalsel" },
+  { label: "KALTIM", value: "kaltim" },
+  { label: "SULUT", value: "sulut" },
+  { label: "SULTENG", value: "sulteng" },
+  { label: "SULSEL", value: "sulsel" },
+  { label: "SULTRA", value: "sultra" },
+  { label: "GORONTALO", value: "gorontalo" },
+  { label: "MALUKU", value: "maluku" },
+  { label: "PAPUA", value: "papua" },
+];
+
+const rangeButtons = [
+  { label: "1Y", value: "1Y" },
+  { label: "5Y", value: "5Y" },
+  { label: "8Y", value: "8Y" },
+];
+
 const chartStore = useChartStore();
 
 const leftPanelRef = ref(null);
@@ -45,8 +86,9 @@ let loadingPercentTimer = null;
 const pdbIndicatorOptions = ref([]);
 const activeSource = ref("");
 const activeStaticDatasetRef = ref(null);
+const dynamicIndicatorUnitMap = ref({});
 
-const componentRuleMode = ref("pkrt");
+const componentRuleMode = ref("admin");
 // pilihan: admin | pkrt | pkp | pmtb | eksim
 
 const dynamicDatasetCache = new Map();
@@ -169,7 +211,7 @@ const stopLoadingStageAnimation = () => {
   }
 };
 
-const waitUntil = async (checker, timeout = 12000, interval = 60) => {
+const waitUntil = async (checker, timeout = 15000, interval = 60) => {
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < timeout) {
@@ -184,6 +226,184 @@ const settleUiRender = async () => {
   await nextTick();
   await nextTick();
   await wait(150);
+};
+
+const normalizeTextKey = (text = "") =>
+  String(text ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[()]/g, "")
+    .trim();
+
+const normalizeUnitLabel = (unit, fallback = "Nilai") => {
+  const text = String(unit ?? "").trim();
+  if (!text) return fallback;
+
+  const lower = text.toLowerCase();
+
+  if (lower === "%" || lower.includes("persen") || lower.includes("percent")) {
+    return "%";
+  }
+
+  if (lower.includes("indeks") || lower.includes("index")) {
+    return "Indeks";
+  }
+
+  if (lower.includes("triliun")) {
+    return "Triliun Rupiah";
+  }
+
+  if (lower.includes("miliar")) {
+    return "Miliar Rupiah";
+  }
+
+  if (lower.includes("juta")) {
+    return "Juta Rupiah";
+  }
+
+  return text;
+};
+
+const getDatasetDisplayName = (dataset) => {
+  return (
+    dataset?.indicatorName ??
+    dataset?.deskripsi ??
+    dataset?.label ??
+    dataset?.name ??
+    ""
+  );
+};
+
+const getDatasetUnitLabel = (dataset, measure = "nilai") => {
+  if (measure === "pertumbuhan") return "%";
+
+  const codeCandidates = [
+    dataset?.apiCode,
+    dataset?.kode,
+    dataset?.code,
+    dataset?.sourceCode,
+    dataset?.meta?.kode,
+    dataset?.meta?.code,
+  ]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+
+  const nameCandidates = [
+    dataset?.indicatorName,
+    dataset?.deskripsi,
+    dataset?.label,
+    dataset?.name,
+    dataset?.meta?.deskripsi,
+    dataset?.meta?.label,
+  ]
+    .map((v) => normalizeTextKey(v))
+    .filter(Boolean);
+
+  let rawUnit =
+    dataset?.valueUnitLabel ??
+    dataset?.satuan ??
+    dataset?.unit ??
+    dataset?.satuanLabel ??
+    dataset?.meta?.satuan ??
+    dataset?.meta?.unit ??
+    "";
+
+  if (!rawUnit) {
+    for (const code of codeCandidates) {
+      if (dynamicIndicatorUnitMap.value[code]) {
+        rawUnit = dynamicIndicatorUnitMap.value[code];
+        break;
+      }
+    }
+  }
+
+  if (!rawUnit) {
+    for (const name of nameCandidates) {
+      if (dynamicIndicatorUnitMap.value[`name:${name}`]) {
+        rawUnit = dynamicIndicatorUnitMap.value[`name:${name}`];
+        break;
+      }
+    }
+  }
+
+  return normalizeUnitLabel(rawUnit, "Nilai");
+};
+
+const getAxisTitleForMeasure = (measure = "nilai") => {
+  return measure === "pertumbuhan" ? "PERTUMBUHAN (%)" : "NILAI";
+};
+
+const getLegendLabelWithUnit = (dataset, measure = "nilai") => {
+  const name = getDatasetDisplayName(dataset);
+  const unit = getDatasetUnitLabel(dataset, measure);
+  return unit ? `${name} (${unit})` : name;
+};
+
+const getRangeLimitByAggregation = (aggregation, rangeKey) => {
+  if (rangeKey === "1Y") {
+    if (aggregation === "monthly") return 12;
+    if (aggregation === "quarterly") return 4;
+    if (aggregation === "yearly") return 1;
+  }
+
+  if (rangeKey === "5Y") {
+    if (aggregation === "monthly") return 60;
+    if (aggregation === "quarterly") return 20;
+    if (aggregation === "yearly") return 5;
+  }
+
+  if (rangeKey === "8Y") {
+    if (aggregation === "monthly") return 96;
+    if (aggregation === "quarterly") return 32;
+    if (aggregation === "yearly") return 8;
+  }
+
+  return null;
+};
+
+const trimMetaByRange = (meta, rangeKey = "8Y") => {
+  const aggregation = meta?.aggregation ?? "monthly";
+  const limit = getRangeLimitByAggregation(aggregation, rangeKey);
+
+  if (!limit) return meta;
+
+  const periods = Array.isArray(meta?.periods) ? meta.periods : [];
+  const data = Array.isArray(meta?.data) ? meta.data : [];
+
+  if (periods.length <= limit) return meta;
+
+  return {
+    ...meta,
+    periods: periods.slice(-limit),
+    data: data.slice(-limit),
+  };
+};
+
+const resolveHeaderSource = (headerText = "") => {
+  const acronym = getComponentAcronym(headerText);
+
+  if (acronym === "PKRT") return "pkrt";
+  if (acronym === "PKP") return "pkp";
+  if (acronym === "PMTB") return "pmtb";
+  if (acronym === "EKSPOR" || acronym === "IMPOR") return "eksim";
+
+  return "";
+};
+
+const shortenComponentLabel = (text = "") => {
+  return getComponentAcronym(text);
+};
+
+const formatComponentOptionLabel = (item) => {
+  const deskripsi = String(item?.deskripsi ?? "").trim();
+  const marker = extractLeadingMarker(deskripsi);
+
+  if (/^\d+\.$/.test(marker)) {
+    return shortenComponentLabel(deskripsi);
+  }
+
+  return deskripsi.replace(/^[a-z]\.\s*/i, "").trim();
 };
 
 const monthNames = [
@@ -447,6 +667,7 @@ const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
   if (aggregation === "monthly") {
     return (
       hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony_m) ||
       hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
       hasValidSeriesData(dataset?.growth?.monthly?.ytod)
     );
@@ -526,7 +747,17 @@ const getBackendGrowthMeta = (dataset, aggregation, method, fallbackPeriods = []
     };
   }
 
-  const payload = dataset?.growth?.[aggregation]?.[method];
+  let payload = null;
+
+  if (aggregation === "monthly") {
+    if (method === "yony") {
+      payload = dataset?.growth?.monthly?.yony_m ?? dataset?.growth?.monthly?.yony;
+    } else {
+      payload = dataset?.growth?.monthly?.[method];
+    }
+  } else {
+    payload = dataset?.growth?.[aggregation]?.[method];
+  }
 
   if (Array.isArray(payload)) {
     return {
@@ -609,72 +840,90 @@ const mapWithConcurrency = async (items, mapper, limit = 4) => {
   return results;
 };
 
-/**
- * =========================================================
- * PDB component -> source mapper
- * =========================================================
- */
 const extractLeadingMarker = (text = "") => {
-  return String(text).trim().match(/^([0-9]+\.|[a-zA-Z]\.)/)?.[1] ?? "";
+  const clean = String(text ?? "").trim();
+  return clean.match(/^\s*(\d+\.|[a-zA-Z]\.)\s*/)?.[1] ?? "";
 };
 
-const resolveHeaderSource = (headerText = "") => {
-  const text = String(headerText).trim();
+const stripLeadingMarker = (text = "") => {
+  return String(text ?? "")
+    .replace(/^\s*(\d+\.|[a-zA-Z]\.)\s*/i, "")
+    .trim();
+};
 
-  if (/^1\./i.test(text)) return "pkrt";
-  if (/^3\./i.test(text)) return "pkp";
-  if (/^4\./i.test(text)) return "pmtb";
-  if (/^6\./i.test(text)) return "eksim";
-  if (/^7\./i.test(text)) return "eksim";
+const getComponentAcronym = (text = "") => {
+  const clean = stripLeadingMarker(text).toUpperCase();
 
-  if (/^2\./i.test(text)) return "";
-  if (/^8\./i.test(text)) return "";
-  if (/^9\./i.test(text)) return "";
+  if (clean.startsWith("PENGELUARAN KONSUMSI RUMAHTANGGA")) return "PKRT";
+  if (clean.startsWith("PENGELUARAN KONSUMSI LNPRT")) return "LNPRT";
+  if (clean.startsWith("PENGELUARAN KONSUMSI PEMERINTAH")) return "PKP";
+  if (clean.startsWith("PEMBENTUKAN MODAL TETAP BRUTO")) return "PMTB";
+  if (clean.startsWith("PERUBAHAN INVENTORI")) return "PI";
+  if (clean.startsWith("EKSPOR BARANG DAN JASA")) return "EKSPOR";
+  if (clean.startsWith("IMPOR BARANG DAN JASA")) return "IMPOR";
 
-  return "";
+  return stripLeadingMarker(text);
 };
 
 const buildPdbComponentMappings = (items = []) => {
   let currentHeaderText = "";
+  let currentHeaderShort = "";
   let currentHeaderSource = "";
 
   return items.map((item) => {
-    const deskripsi = String(item?.deskripsi ?? "").trim();
-    const marker = extractLeadingMarker(deskripsi);
+    const rawDeskripsi = String(item?.deskripsi ?? "").trim();
+    const marker = extractLeadingMarker(rawDeskripsi);
     const isHeader = /^\d+\.$/.test(marker);
     const isSub = /^[a-zA-Z]\.$/.test(marker);
 
     if (isHeader) {
-      currentHeaderText = deskripsi;
-      currentHeaderSource = resolveHeaderSource(deskripsi);
+      currentHeaderText = stripLeadingMarker(rawDeskripsi);
+      currentHeaderShort = getComponentAcronym(rawDeskripsi);
+      currentHeaderSource = resolveHeaderSource(rawDeskripsi);
 
       return {
         ...item,
         marker,
         isHeader: true,
         isSub: false,
-        parentHeaderText: deskripsi,
+        deskripsi: currentHeaderText,
+        shortLabel: currentHeaderShort,
+        fullLabel: currentHeaderText,
+        parentHeaderText: currentHeaderText,
+        parentHeaderShort: currentHeaderShort,
         mappedSource: currentHeaderSource,
       };
     }
 
     if (isSub) {
+      const cleanSub = stripLeadingMarker(rawDeskripsi);
+
       return {
         ...item,
         marker,
         isHeader: false,
         isSub: true,
+        deskripsi: cleanSub,
+        shortLabel: cleanSub,
+        fullLabel: cleanSub,
         parentHeaderText: currentHeaderText,
+        parentHeaderShort: currentHeaderShort,
         mappedSource: currentHeaderSource,
       };
     }
+
+    const cleanText = stripLeadingMarker(rawDeskripsi);
 
     return {
       ...item,
       marker,
       isHeader: false,
       isSub: false,
+      deskripsi: cleanText,
+      shortLabel: cleanText,
+      fullLabel: cleanText,
       parentHeaderText: currentHeaderText,
+      parentHeaderShort: currentHeaderShort,
       mappedSource: currentHeaderSource,
     };
   });
@@ -709,13 +958,36 @@ const getCachedDynamicDataset = async (item) => {
     source: item.source,
     kode: item.kode,
     deskripsi: item.deskripsi,
+    satuan: item.satuan,
   });
 
-  if (dataset) {
-    dynamicDatasetCache.set(key, dataset);
+  const mergedDataset = dataset
+    ? {
+        ...dataset,
+        kode: dataset?.kode ?? item?.kode ?? "",
+        apiCode: dataset?.apiCode ?? item?.kode ?? "",
+        sourceCode: dataset?.sourceCode ?? item?.kode ?? "",
+        satuan: dataset?.satuan ?? item?.satuan ?? "",
+        deskripsi: dataset?.deskripsi ?? item?.deskripsi ?? "",
+        indicatorName:
+          dataset?.indicatorName ??
+          item?.deskripsi ??
+          dataset?.deskripsi ??
+          "",
+        meta: {
+          ...(dataset?.meta ?? {}),
+          kode: dataset?.meta?.kode ?? item?.kode ?? "",
+          satuan: dataset?.meta?.satuan ?? item?.satuan ?? "",
+          deskripsi: dataset?.meta?.deskripsi ?? item?.deskripsi ?? "",
+        },
+      }
+    : null;
+
+  if (mergedDataset) {
+    dynamicDatasetCache.set(key, mergedDataset);
   }
 
-  return dataset;
+  return mergedDataset;
 };
 
 const getCachedStaticDataset = async ({ kode, deskripsi, measure }) => {
@@ -742,9 +1014,20 @@ const filteredPdbIndicatorOptions = computed(() =>
   )
 );
 
+const globalComponentOptions = computed(() =>
+  filteredPdbIndicatorOptions.value.map((item) => ({
+    label: item?.shortLabel || item?.deskripsi || "",
+    fullLabel: item?.isHeader
+      ? (item?.fullLabel || item?.deskripsi || "")
+      : "",
+    value: String(item.kode),
+    isHeader: !!item?.isHeader,
+  }))
+);
+
 const staticComponentOptions = computed(() =>
   filteredPdbIndicatorOptions.value.map((item) => ({
-    label: `${item.kode} - ${item.deskripsi}`,
+    label: formatComponentOptionLabel(item),
     value: String(item.kode),
   }))
 );
@@ -808,6 +1091,14 @@ const isRightUiReady = computed(() => {
   return true;
 });
 
+const areVisibleChartsRendered = () => {
+  const leftReady = !leftPanelRef.value || !!leftPanelRef.value.querySelector("canvas");
+  const rightReady =
+    isGabung.value || !rightPanelRef.value || !!rightPanelRef.value.querySelector("canvas");
+
+  return leftReady && rightReady;
+};
+
 const isPageContentReady = computed(() => {
   return !isLoadingCards.value && isLeftUiReady.value && isRightUiReady.value;
 });
@@ -824,8 +1115,13 @@ const withPageBusy = async (fn) => {
     loadingPulseKey.value += 1;
 
     await settleUiRender();
-    await waitUntil(() => isPageContentReady.value, 12000, 60);
+    await waitUntil(
+      () => isPageContentReady.value && areVisibleChartsRendered(),
+      15000,
+      60
+    );
     await settleUiRender();
+    await wait(280);
 
     await finishLoadingStageAnimation();
     await wait(220);
@@ -876,6 +1172,17 @@ const loadCardsFromMappedSource = async () => {
     activeSource.value = source;
 
     const indikator = await fetchIndicatorsBySource(source);
+
+    dynamicIndicatorUnitMap.value = indikator.reduce((acc, item) => {
+      const unit = String(item?.satuan ?? item?.unit ?? "").trim();
+      const kode = String(item?.kode ?? item?.code ?? item?.apiCode ?? "").trim();
+      const nama = normalizeTextKey(item?.deskripsi ?? "");
+
+      if (kode) acc[kode] = unit;
+      if (nama) acc[`name:${nama}`] = unit;
+
+      return acc;
+    }, {});
 
     const datasets = await mapWithConcurrency(
       indikator.map((item) => ({
@@ -1064,6 +1371,7 @@ const theme = computed(() => {
     text: style.getPropertyValue("--p-text-color").trim(),
     textSecondary: style.getPropertyValue("--p-text-muted-color").trim(),
     border: style.getPropertyValue("--p-content-border-color").trim(),
+    panelBg: style.getPropertyValue("--p-content-background").trim(),
   };
 });
 
@@ -1153,28 +1461,31 @@ const staticSeriesMeta = computed(() => {
   }
 
   const aggregation = staticPeriod.value === "yearly" ? "yearly" : "quarterly";
+  let meta;
 
   if (staticMeasure.value === "nilai") {
-    return getSeriesMeta(activeStaticDataset.value, aggregation);
+    meta = getSeriesMeta(activeStaticDataset.value, aggregation);
+  } else {
+    const baseMeta = getSeriesMeta(activeStaticDataset.value, aggregation);
+
+    if (aggregation === "yearly") {
+      meta = getBackendGrowthMeta(
+        activeStaticDataset.value,
+        "yearly",
+        "annual",
+        baseMeta.periods
+      );
+    } else {
+      meta = getBackendGrowthMeta(
+        activeStaticDataset.value,
+        "quarterly",
+        staticMethod.value || "qtoq",
+        baseMeta.periods
+      );
+    }
   }
 
-  const baseMeta = getSeriesMeta(activeStaticDataset.value, aggregation);
-
-  if (aggregation === "yearly") {
-    return getBackendGrowthMeta(
-      activeStaticDataset.value,
-      "yearly",
-      "annual",
-      baseMeta.periods
-    );
-  }
-
-  return getBackendGrowthMeta(
-    activeStaticDataset.value,
-    "quarterly",
-    staticMethod.value || "qtoq",
-    baseMeta.periods
-  );
+  return trimMetaByRange(meta, selectedRange.value);
 });
 
 const showPrimaryAggregationFilter = computed(() =>
@@ -1508,26 +1819,23 @@ const leftPreparedDynamicSeries = computed(() =>
     const idx = chartStore.selectedDataset.findIndex((item) => item.id === ds.id);
     const colors = palette[idx] ?? palette[0];
     const config = chartStore.getCompareConfig(ds);
-    const meta = getPreparedSeriesMeta(ds, config);
+    const rawMeta = getPreparedSeriesMeta(ds, config);
+    const meta = trimMetaByRange(rawMeta, selectedRange.value);
 
     return {
       dataset: ds,
       meta,
       aggregation: meta.aggregation,
       colors,
+      measure: config?.measure ?? "nilai",
+      unitLabel: getDatasetUnitLabel(ds, config?.measure ?? "nilai"),
     };
   })
 );
 
 const compatibleLeftSeries = computed(() =>
   leftPreparedDynamicSeries.value.filter((item) => {
-    const cfg = chartStore.getCompareConfig(item.dataset) ?? {};
-    const measure = cfg.measure ?? "nilai";
-
-    return (
-      measure === primaryMeasure.value &&
-      item.meta.aggregation === primaryAggregation.value
-    );
+    return item.meta.aggregation === primaryAggregation.value;
   })
 );
 
@@ -1538,8 +1846,47 @@ const activeLeftSeries = computed(() => {
     return leftPreparedDynamicSeries.value;
   }
 
-  return compatibleLeftSeries.value;
+  if (useStackPeriodMerge.value) {
+    return compatibleLeftSeries.value;
+  }
+
+  return leftPreparedDynamicSeries.value;
 });
+
+const hasGrowthSeriesLeft = computed(() =>
+  activeLeftSeries.value.some((item) => item.measure === "pertumbuhan")
+);
+
+const hasValueSeriesLeft = computed(() =>
+  activeLeftSeries.value.some((item) => item.measure !== "pertumbuhan")
+);
+
+const hasMixedMeasureKindsLeft = computed(() => {
+  const kinds = new Set(
+    activeLeftSeries.value.map((item) => item.measure === "pertumbuhan" ? "pertumbuhan" : "nilai")
+  );
+
+  if (isGabung.value && activeStaticDataset.value && staticPeriod.value) {
+    kinds.add(staticMeasure.value === "pertumbuhan" ? "pertumbuhan" : "nilai");
+  }
+
+  return kinds.has("nilai") && kinds.has("pertumbuhan");
+});
+
+const leftPrimaryUnitTitle = computed(() => {
+  if (hasMixedMeasureKindsLeft.value) return "NILAI";
+  if (hasGrowthSeriesLeft.value && !hasValueSeriesLeft.value) return "PERTUMBUHAN (%)";
+  return "NILAI";
+});
+
+const leftSecondaryUnitTitle = computed(() => {
+  if (hasMixedMeasureKindsLeft.value) return "PERTUMBUHAN (%)";
+  return "";
+});
+
+const staticAxisTitle = computed(() =>
+  getAxisTitleForMeasure(staticMeasure.value)
+);
 
 const activeDatasetOrderMap = computed(() => {
   const map = {};
@@ -1774,8 +2121,9 @@ const useStackPeriodMerge = computed(() =>
 
 const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
   const quarterlyMeta = getSeriesMeta(staticDataset, "quarterly");
-  const quarterPeriods = quarterlyMeta.periods ?? [];
-  const quarterTotals = quarterlyMeta.data ?? [];
+  const trimmedQuarterlyMeta = trimMetaByRange(quarterlyMeta, selectedRange.value);
+  const quarterPeriods = trimmedQuarterlyMeta.periods ?? [];
+  const quarterTotals = trimmedQuarterlyMeta.data ?? [];
 
   if (!leftSeries.length || !quarterPeriods.length) {
     return { labels: [], datasets: [] };
@@ -1837,7 +2185,7 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
       });
 
       datasets.push({
-        label: `${seriesItem.dataset.indicatorName} - ${monthNamesShort[idx]}`,
+        label: `${getDatasetDisplayName(seriesItem.dataset)} - ${monthNamesShort[idx]}`,
         data: monthlySlotMap[slot],
         tooltipPeriods: labels,
         sourceAggregation: "monthly",
@@ -1874,7 +2222,7 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
   });
 
   datasets.push({
-    label: `${staticDataset.indicatorName} - Total Triwulan`,
+    label: `${getDatasetDisplayName(staticDataset)} - Total Triwulan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "quarterly",
@@ -1899,8 +2247,9 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
 
 const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
   const yearlyMeta = getSeriesMeta(staticDataset, "yearly");
-  const yearPeriods = (yearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
-  const yearTotals = yearlyMeta.data ?? [];
+  const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
+  const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
+  const yearTotals = trimmedYearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
     return { labels: [], datasets: [] };
@@ -1957,7 +2306,7 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
       });
 
       datasets.push({
-        label: `${seriesItem.dataset.indicatorName} - ${monthNames[slot - 1]}`,
+        label: `${getDatasetDisplayName(seriesItem.dataset)} - ${monthNames[slot - 1]}`,
         data: monthlySlotMap[slot],
         tooltipPeriods: labels,
         sourceAggregation: "monthly",
@@ -1994,7 +2343,7 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
   });
 
   datasets.push({
-    label: `${staticDataset.indicatorName} - Total Tahunan`,
+    label: `${getDatasetDisplayName(staticDataset)} - Total Tahunan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "yearly",
@@ -2019,8 +2368,9 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
 
 const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
   const yearlyMeta = getSeriesMeta(yearlyDataset, "yearly");
-  const yearPeriods = (yearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
-  const yearTotals = yearlyMeta.data ?? [];
+  const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
+  const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
+  const yearTotals = trimmedYearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
     return { labels: [], datasets: [] };
@@ -2080,7 +2430,7 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
       });
 
       datasets.push({
-        label: `${seriesItem.dataset.indicatorName} - Q${slot}`,
+        label: `${getDatasetDisplayName(seriesItem.dataset)} - Q${slot}`,
         data: quarterSlotMap[slot],
         tooltipPeriods: labels,
         sourceAggregation: "quarterly",
@@ -2117,7 +2467,7 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
   });
 
   datasets.push({
-    label: `${yearlyDataset.indicatorName} - Total Tahunan`,
+    label: `${getDatasetDisplayName(yearlyDataset)} - Total Tahunan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "yearly",
@@ -2181,15 +2531,19 @@ const chartDataL = computed(() => {
       sourceAggregation: item.aggregation,
     });
 
+    const yAxisID = hasMixedMeasureKindsLeft.value
+      ? (item.measure === "pertumbuhan" ? "y1" : "y")
+      : "y";
+
     return {
-      label: item.dataset.indicatorName,
+      label: getLegendLabelWithUnit(item.dataset, item.measure),
       data: toPointData(item.meta),
       ...tooltipMeta,
       ...buildDatasetStyle({
         chartType: dynamicChartType.value,
         lineColor: item.colors.line,
         fillColor: item.colors.fill,
-        yAxisID: "y",
+        yAxisID,
         xAxisID: aggregationToAxisId(item.aggregation),
         isStatic: false,
       }),
@@ -2199,8 +2553,12 @@ const chartDataL = computed(() => {
   if (isGabung.value && staticDs && staticPeriod.value) {
     const staticAggregation = staticPeriod.value === "yearly" ? "yearly" : "quarterly";
 
+    const staticYAxisID = hasMixedMeasureKindsLeft.value
+      ? (staticMeasure.value === "pertumbuhan" ? "y1" : "y")
+      : "y";
+
     dyn.push({
-      label: staticDs.indicatorName,
+      label: getLegendLabelWithUnit(staticDs, staticMeasure.value),
       data: toPointData(staticSeriesMeta.value),
       ...createDatasetTooltipMeta({
         periods: staticSeriesMeta.value.periods,
@@ -2210,7 +2568,7 @@ const chartDataL = computed(() => {
         chartType: staticChartType.value,
         lineColor: theme.value.primary || "#10B981",
         fillColor: "rgba(16, 185, 129, 0.45)",
-        yAxisID: "y1",
+        yAxisID: staticYAxisID,
         xAxisID: aggregationToAxisId(staticAggregation),
         isStatic: true,
       }),
@@ -2234,7 +2592,7 @@ const chartDataR = computed(() => ({
       ? [
           {
             ...activeStaticDataset.value,
-            label: activeStaticDataset.value.indicatorName,
+            label: getLegendLabelWithUnit(activeStaticDataset.value, staticMeasure.value),
             data: toPointData(staticSeriesMeta.value),
             ...createDatasetTooltipMeta({
               periods: staticSeriesMeta.value.periods,
@@ -2259,21 +2617,27 @@ const valueLabelPlugin = {
     const { ctx } = chart;
 
     chart.data.datasets.forEach((dataset, datasetIndex) => {
-      if (dataset?.isStatic) return;
-      if (datasetIndex !== 0) return;
-      if (dataset.type !== "line") return;
+      if (!dataset) return;
+      if (dataset.isStatic !== true) return;
+      if (String(dataset.type ?? "").toLowerCase() !== "line") return;
 
       const meta = chart.getDatasetMeta(datasetIndex);
-      if (meta.hidden) return;
+      if (!meta || meta.hidden || !Array.isArray(meta.data)) return;
 
       meta.data.forEach((element, i) => {
-        const raw = dataset.data[i];
-        const val = raw?.y;
+        const point = dataset.data?.[i];
+        const val =
+          point && typeof point === "object"
+            ? point.y
+            : Array.isArray(dataset.data)
+              ? dataset.data[i]
+              : null;
 
-        if (val === null || val === undefined) return;
+        if (val === null || val === undefined || Number.isNaN(Number(val))) return;
 
         const x = element?.x;
         const y = element?.y;
+
         if (x === undefined || y === undefined) return;
 
         ctx.save();
@@ -2281,7 +2645,7 @@ const valueLabelPlugin = {
         ctx.fillStyle = theme.value.text || "#E5E7EB";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
-        ctx.fillText(Number(val).toFixed(2), x, y - 6);
+        ctx.fillText(Number(val).toFixed(2), x, y - 8);
         ctx.restore();
       });
     });
@@ -2661,14 +3025,24 @@ const buildChartOptions = (chartTypeRef, isRightChart = false) =>
           stacked: useStackPeriodMerge.value,
           ticks: { color: theme.value.textSecondary },
           grid: { color: theme.value.border },
+          title: {
+            display: true,
+            color: theme.value.textSecondary,
+            text: isRightChart ? staticAxisTitle.value : leftPrimaryUnitTitle.value,
+          },
         },
         y1: {
           position: "right",
           beginAtZero: false,
           stacked: useStackPeriodMerge.value || shouldStackQuarterly.value || shouldStackYearly.value,
-          display: !isRightChart && isGabung.value && !!staticComponent.value && !!staticPeriod.value,
+          display: !isRightChart && hasMixedMeasureKindsLeft.value,
           ticks: { color: theme.value.textSecondary },
           grid: { drawOnChartArea: false },
+          title: {
+            display: !isRightChart && hasMixedMeasureKindsLeft.value,
+            color: theme.value.textSecondary,
+            text: leftSecondaryUnitTitle.value,
+          },
         },
       },
     };
@@ -2686,6 +3060,8 @@ const leftChartKey = computed(() => {
         item.aggregation,
         item.meta?.periods?.[0] ?? "",
         item.meta?.periods?.length ?? 0,
+        item.measure ?? "",
+        item.unitLabel ?? "",
       ].join(":");
     })
     .join(",");
@@ -2703,6 +3079,7 @@ const leftChartKey = computed(() => {
     staticPeriod.value ?? "",
     staticMethod.value ?? "",
     combineBarMode.value ?? "",
+    selectedRange.value ?? "",
     useStackPeriodMerge.value ? "stack-period" : "normal",
     isGabung.value ? "gabung" : "single",
     activeStaticDataset.value?.id ?? "no-static",
@@ -2722,6 +3099,7 @@ const rightChartKey = computed(() => {
     staticPeriod.value ?? "",
     staticMethod.value ?? "",
     staticChartType.value ?? "",
+    selectedRange.value ?? "",
     staticSeriesMeta.value?.periods?.[0] ?? "",
     staticSeriesMeta.value?.periods?.length ?? 0,
   ].join("|");
@@ -2806,17 +3184,72 @@ const rightChartKey = computed(() => {
 
     <div class="flex-8 h-full overflow-hidden">
       <div class="h-full overflow-auto p-4">
-        <Button
-          :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
-          :outlined="!isGabung"
-          rounded
-          :disabled="isCombineDisabled || isPageBusy"
-          @click="onToggleGabung"
-        />
+        <div class="global-top-toolbar mb-3 flex flex-wrap items-end justify-between gap-3">
+          <div class="global-left-tools flex flex-wrap items-end gap-3">
+            <div class="standalone-filter-box">
+              <label class="standalone-filter-label">Wilayah</label>
+              <select
+                v-model="selectedProvince"
+                class="standalone-filter-control"
+                :disabled="isPageBusy"
+              >
+                <option
+                  v-for="opt in provinceOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+
+            <div class="standalone-filter-box">
+              <label class="standalone-filter-label">Komponen</label>
+              <select
+                v-model="staticComponent"
+                class="standalone-filter-control component-dropdown"
+                :disabled="isPageBusy"
+              >
+                <option value="" disabled>Pilih komponen</option>
+                <option
+                  v-for="opt in globalComponentOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                  :title="opt.fullLabel"
+                  :class="{ 'component-option-header': opt.isHeader }"
+                >
+                  {{ opt.label }}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div class="global-right-tools flex flex-wrap items-center justify-end gap-2">
+            <button
+              v-for="item in rangeButtons"
+              :key="item.value"
+              type="button"
+              class="range-chip"
+              :class="{ active: selectedRange === item.value }"
+              :disabled="isPageBusy"
+              @click="selectedRange = item.value"
+            >
+              {{ item.label }}
+            </button>
+
+            <Button
+              :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
+              :outlined="!isGabung"
+              rounded
+              :disabled="isCombineDisabled || isPageBusy"
+              @click="onToggleGabung"
+            />
+          </div>
+        </div>
 
         <p
           v-if="isCombineDisabled"
-          class="mt-2 text-[12px] text-amber-400"
+          class="mb-2 text-[12px] text-amber-400"
         >
           {{ combineDisabledMessage }}
         </p>
@@ -2982,24 +3415,6 @@ const rightChartKey = computed(() => {
 
               <div class="theme-filter-panel mb-3 rounded-lg border p-3">
                 <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
-                  <div>
-                    <label class="theme-text-muted mb-1 block text-[12px]">Komponen</label>
-                    <select
-                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                      v-model="staticComponent"
-                      :disabled="isPageBusy"
-                    >
-                      <option value="" disabled>Pilih komponen</option>
-                      <option
-                        v-for="opt in staticComponentOptions"
-                        :key="opt.value"
-                        :value="opt.value"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-
                   <div v-if="showStaticPeriodFilter">
                     <label class="theme-text-muted mb-1 block text-[12px]">Pilih Tampilan</label>
                     <select
@@ -3085,6 +3500,7 @@ const rightChartKey = computed(() => {
                 :type="staticChartType"
                 :data="chartDataR"
                 :options="chartOptionsR"
+                :plugins="[valueLabelPlugin]"
                 class="h-120"
               />
             </div>
@@ -3115,6 +3531,79 @@ const rightChartKey = computed(() => {
 .theme-select:focus {
   border-color: var(--p-primary-500);
   box-shadow: 0 0 0 1px var(--p-primary-500);
+}
+
+.global-top-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  padding: 4px 0 2px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--p-content-background) 92%, transparent),
+    color-mix(in srgb, var(--p-content-background) 72%, transparent)
+  );
+  backdrop-filter: blur(8px);
+}
+
+.standalone-filter-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.standalone-filter-label {
+  font-size: 12px;
+  line-height: 1;
+  color: var(--p-text-muted-color);
+  padding-left: 4px;
+}
+
+.standalone-filter-control {
+  min-width: 148px;
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid var(--p-content-border-color);
+  background: var(--p-content-background);
+  color: var(--p-text-color);
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.standalone-filter-control:hover {
+  transform: translateY(-1px);
+}
+
+.standalone-filter-control:focus {
+  border-color: var(--p-primary-500);
+  box-shadow: 0 0 0 1px var(--p-primary-500);
+}
+
+.range-chip {
+  min-width: 54px;
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--p-content-border-color);
+  background: var(--p-content-background);
+  color: var(--p-text-color);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  transition: all 0.2s ease;
+}
+
+.range-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--p-primary-400);
+}
+
+.range-chip.active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #2563eb, #14b8a6);
+  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
 }
 
 .charts-shell {
@@ -3574,26 +4063,6 @@ const rightChartKey = computed(() => {
   background: rgba(148, 163, 184, 0.12);
 }
 
-.page-loading-bar-glow {
-  position: absolute;
-  top: 0;
-  left: -40%;
-  width: 40%;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(
-    90deg,
-    rgba(20, 184, 166, 0),
-    rgba(20, 184, 166, 0.9),
-    rgba(59, 130, 246, 0.95),
-    rgba(59, 130, 246, 0)
-  );
-  box-shadow:
-    0 0 14px rgba(20,184,166,0.45),
-    0 0 18px rgba(59,130,246,0.28);
-  animation: loadingBarRun 1.4s ease-in-out infinite;
-}
-
 .page-loading-dots {
   margin-top: 16px;
   display: flex;
@@ -3696,16 +4165,6 @@ const rightChartKey = computed(() => {
   text-shadow: 0 0 12px rgba(20, 184, 166, 0.22);
 }
 
-.page-loading-bar {
-  position: relative;
-  width: 100%;
-  height: 7px;
-  margin-top: 18px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(148, 163, 184, 0.12);
-}
-
 .page-loading-bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
@@ -3738,5 +4197,35 @@ const rightChartKey = computed(() => {
   );
   mix-blend-mode: screen;
   animation: loadingBarRun 1.4s ease-in-out infinite;
+}
+
+@media (max-width: 1200px) {
+  .global-top-toolbar {
+    align-items: stretch;
+  }
+
+  .global-right-tools {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 768px) {
+  .standalone-filter-control {
+    min-width: 128px;
+  }
+
+  .range-chip {
+    min-width: 48px;
+    padding: 0 12px;
+  }
+}
+
+.standalone-filter-control-wide {
+  min-width: 240px;
+  max-width: 320px;
+}
+
+.component-dropdown option.component-option-header {
+  font-weight: 700;
 }
 </style>

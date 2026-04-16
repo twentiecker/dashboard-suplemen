@@ -13,6 +13,7 @@ const api = axios.create({
 const SOURCE_ENDPOINTS = {
   pkrt: {
     indikator: "/api/v1/pkrt/indikator",
+    kode: "/api/v1/pkrt/kode",
     chart: "/api/v1/pkrt/chart",
     timeseries: "/api/v1/pkrt/timeseries",
     quarterChart: "/api/v1/pkrt/quarter/chart",
@@ -25,6 +26,7 @@ const SOURCE_ENDPOINTS = {
 
   pkp: {
     indikator: "/api/v1/pkp/indikator",
+    kode: "/api/v1/pkp/kode",
     chart: "/api/v1/pkp/chart",
     timeseries: "/api/v1/pkp/timeseries",
     quarterChart: "/api/v1/pkp/quarter/chart",
@@ -37,6 +39,7 @@ const SOURCE_ENDPOINTS = {
 
   pmtb: {
     indikator: "/api/v1/pmtb/indikator",
+    kode: "/api/v1/pmtb/kode",
     chart: "/api/v1/pmtb/chart",
     timeseries: "/api/v1/pmtb/timeseries",
     quarterChart: "/api/v1/pmtb/quarter/chart",
@@ -49,6 +52,7 @@ const SOURCE_ENDPOINTS = {
 
   eksim: {
     indikator: "/api/v1/eksim/indikator",
+    kode: "/api/v1/eksim/kode",
     chart: "/api/v1/eksim/chart",
     timeseries: "/api/v1/eksim/timeseries",
     quarterChart: "/api/v1/eksim/quarter/chart",
@@ -61,6 +65,7 @@ const SOURCE_ENDPOINTS = {
 
   pdb: {
     indikator: "/api/v1/pdb/indikator",
+    kode: "/api/v1/pdb/kode",
     chart: "/api/v1/pdb/chart",
     timeseries: "/api/v1/pdb/timeseries",
     quarterChart: "/api/v1/pdb/quarter/chart",
@@ -88,6 +93,8 @@ const META_KEYS = new Set([
   "jenis",
   "komponen",
   "type",
+  "satuan",
+  "unit",
 ]);
 
 const VALUE_KEY_PRIORITY = [
@@ -99,6 +106,7 @@ const VALUE_KEY_PRIORITY = [
   "growth",
   "rate",
   "mtom",
+  "yony_m",
   "yony",
   "ytod",
   "qtoq",
@@ -155,8 +163,6 @@ const isQuarterOnlyCode = (kode) => getCodePrefix(kode) === "Q";
  * =========================================================
  * REQUEST CACHE
  * =========================================================
- * dipakai untuk mencegah request endpoint+params yang sama
- * ditembak berkali-kali secara paralel / berulang
  */
 const requestCache = new Map();
 
@@ -170,7 +176,9 @@ const stableStringify = (value) => {
   }
 
   const keys = Object.keys(value).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  return `{${keys
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+    .join(",")}}`;
 };
 
 const buildRequestCacheKey = (url, config = {}) => {
@@ -205,9 +213,7 @@ const toNumberOrNull = (value) => {
     return Number.isNaN(value) ? null : value;
   }
 
-  const normalized = String(value)
-    .replace(/\s/g, "")
-    .replace(/,/g, ".");
+  const normalized = String(value).replace(/\s/g, "").replace(/,/g, ".");
 
   const n = Number(normalized);
   return Number.isNaN(n) ? null : n;
@@ -261,8 +267,6 @@ const rowsToSeries = ({ rows = [], fallbackFreq = "M", valueKey }) => {
 /**
  * =========================================================
  * PERIOD NORMALIZER
- * backend quarter kadang datang sebagai:
- * 2018M3, 2018M6, 2018M9, 2018M12
  * =========================================================
  */
 const convertMonthlyQuarterMarkerToQuarter = (period) => {
@@ -304,7 +308,7 @@ const maybeNormalizeQuarterPeriods = (periods = []) => {
 const getGrowthSeriesCandidateNames = (canonicalType) => {
   const map = {
     mtom: ["mtom_growth", "mtm_growth", "growth", "mtom", "mtm"],
-    yony: ["yony_growth", "yoy_growth", "growth", "yony", "yoy"],
+    yony: ["yony_m", "yony_growth", "yoy_growth", "growth", "yony", "yoy"],
     ytod: ["ytod_growth", "ytd_growth", "growth", "ytod", "ytd"],
     qtoq: ["qtoq_growth", "qtq_growth", "growth", "qtoq", "qtq"],
     ctoc: ["ctoc_growth", "ctc_growth", "growth", "ctoc", "ctc"],
@@ -333,7 +337,7 @@ const findSeriesByNames = (series = [], names = []) => {
 const findValueSeries = (series = []) => {
   if (!Array.isArray(series) || !series.length) return null;
 
-  const preferredNames = ["nilai", "value", "data", "annual"];
+  const preferredNames = ["nilai", "value", "data", "annual", "quarter"];
   const preferred = findSeriesByNames(series, preferredNames);
   if (preferred) return preferred;
 
@@ -387,10 +391,7 @@ const normalizeObjectArrayPayload = ({
 
 const normalizeValuePayload = (
   payload,
-  {
-    forcedValueKey,
-    quarterPeriodNormalization = false,
-  } = {}
+  { forcedValueKey, quarterPeriodNormalization = false } = {}
 ) => {
   if (Array.isArray(payload)) {
     if (!payload.length) return emptySeries();
@@ -470,10 +471,7 @@ const normalizeValuePayload = (
 
 const normalizeGrowthPayload = (
   payload,
-  {
-    canonicalType,
-    quarterPeriodNormalization = false,
-  } = {}
+  { canonicalType, quarterPeriodNormalization = false } = {}
 ) => {
   if (!payload) return emptySeries();
 
@@ -643,19 +641,6 @@ const getKodeParams = (kode, extra = {}) => ({
   params: { kode, ...extra },
 });
 
-const fetchSingleSeries = async ({
-  endpoint,
-  configBuilder,
-  normalizer,
-}) => {
-  const result = await safe(async () => {
-    const { data } = await cachedGet(endpoint, configBuilder());
-    return normalizer(data);
-  });
-
-  return result ?? emptySeries();
-};
-
 const fetchFirstWorkingSeriesFromEndpoints = async ({
   endpoints = [],
   configBuilder,
@@ -741,6 +726,42 @@ const toShortCode = (source, kode, deskripsi) => {
   return `${prefix}-${acronym || String(kode ?? "").toUpperCase()}`;
 };
 
+const fetchUnitBySource = async (source, kode) => {
+  const config = getSourceConfig(source);
+  if (!config?.kode) return "";
+
+  const result = await safe(async () => {
+    const { data } = await cachedGet(config.kode, getKodeParams(kode));
+
+    const extractUnit = (item) =>
+      String(
+        item?.satuan ??
+        item?.unit ??
+        item?.satuan_data ??
+        item?.satuan_indikator ??
+        ""
+      ).trim();
+
+    if (Array.isArray(data)) {
+      const found = data.find((item) => extractUnit(item));
+      return found ? extractUnit(found) : "";
+    }
+
+    if (Array.isArray(data?.data)) {
+      const found = data.data.find((item) => extractUnit(item));
+      return found ? extractUnit(found) : "";
+    }
+
+    if (data && typeof data === "object") {
+      return extractUnit(data);
+    }
+
+    return "";
+  });
+
+  return result ?? "";
+};
+
 /**
  * =========================================================
  * GENERIC SOURCE FETCHERS
@@ -758,8 +779,17 @@ export const fetchIndicatorsBySource = async (source) => {
   return data.map((item, index) => ({
     source: sourceKey,
     kode: String(item?.kode ?? `${sourceKey.toUpperCase()}-${index + 1}`),
-    deskripsi: String(item?.deskripsi ?? item?.kode ?? `Indikator ${index + 1}`),
+    deskripsi: String(
+      item?.deskripsi ?? item?.kode ?? `Indikator ${index + 1}`
+    ),
     apiFreqPrefix: String(item?.kode ?? "").charAt(0).toUpperCase(),
+    satuan: String(
+      item?.satuan ??
+      item?.unit ??
+      item?.satuan_data ??
+      item?.satuan_indikator ??
+      ""
+    ).trim(),
   }));
 };
 
@@ -782,10 +812,9 @@ const fetchQuarterlyNilaiBySource = async (source, kode) => {
   const config = getSourceConfig(source);
   if (!config) return emptySeries();
 
-  // Prefix Q
   if (isQuarterOnlyCode(kode)) {
     return fetchFirstWorkingSeriesFromEndpoints({
-      endpoints: [config.quarterChart, config.quarter],
+      endpoints: [config.quarterChart, config.quarter, config.chart, config.timeseries],
       configBuilder: () => getKodeParams(kode),
       normalizer: (payload) =>
         normalizeValuePayload(payload, {
@@ -794,9 +823,8 @@ const fetchQuarterlyNilaiBySource = async (source, kode) => {
     });
   }
 
-  // Prefix M
   return fetchFirstWorkingSeriesFromEndpoints({
-    endpoints: [config.quarterChart, config.quarter],
+    endpoints: [config.quarterChart, config.quarter, config.chart],
     configBuilder: () => getKodeParams(kode),
     normalizer: (payload) =>
       normalizeValuePayload(payload, {
@@ -867,47 +895,64 @@ const fetchAnnualGrowthBySource = async (source, kode) => {
  * DATASET BUILDERS
  * =========================================================
  */
-const buildGenericDatasetFromApi = async ({ source, kode, deskripsi }) => {
+const buildGenericDatasetFromApi = async ({
+  source,
+  kode,
+  deskripsi,
+  satuan = "",
+}) => {
   try {
     const sourceKey = String(source ?? "").toLowerCase();
     const quarterOnly = isQuarterOnlyCode(kode);
 
-    const [
-      monthlyNilai,
-      quarterlyNilai,
-      yearlyNilai,
-      mtom,
-      monthlyYony,
-      ytod,
-      qtoq,
-      quarterlyYony,
-      ctoc,
-      annual,
-    ] = await Promise.all([
-      safe(() => fetchMonthlyNilaiBySource(sourceKey, kode)),
-      safe(() => fetchQuarterlyNilaiBySource(sourceKey, kode)),
-      safe(() => fetchAnnualNilaiBySource(sourceKey, kode)),
-      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
-      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
-      quarterOnly ? Promise.resolve(emptySeries()) : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
-      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "qtoq")),
-      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "yony")),
-      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "ctoc")),
-      safe(() => fetchAnnualGrowthBySource(sourceKey, kode)),
-    ]);
+const [
+  resolvedUnitFromKode,
+  monthlyNilai,
+  quarterlyNilai,
+  yearlyNilai,
+  mtom,
+  monthlyYony,
+  ytod,
+  qtoq,
+  quarterlyYony,
+  ctoc,
+  annual,
+] = await Promise.all([
+  safe(() => fetchUnitBySource(sourceKey, kode)),
+  safe(() => fetchMonthlyNilaiBySource(sourceKey, kode)),
+  safe(() => fetchQuarterlyNilaiBySource(sourceKey, kode)),
+  safe(() => fetchAnnualNilaiBySource(sourceKey, kode)),
+  quarterOnly
+    ? Promise.resolve(emptySeries())
+    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
+  quarterOnly
+    ? Promise.resolve(emptySeries())
+    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
+  quarterOnly
+    ? Promise.resolve(emptySeries())
+    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
+  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "qtoq")),
+  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "yony")),
+  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "ctoc")),
+  safe(() => fetchAnnualGrowthBySource(sourceKey, kode)),
+]);
 
     const monthly = monthlyNilai ?? emptySeries();
     const quarterly = quarterlyNilai ?? emptySeries();
     const yearly = yearlyNilai ?? emptySeries();
 
-    return {
-      id: `${sourceKey}-${String(kode)}`,
-      label: String(kode),
-      indicatorName: String(deskripsi),
-      groupCode: toShortCode(sourceKey, kode, deskripsi),
-      source: sourceKey,
-      apiCode: String(kode),
-      apiFreqPrefix: String(kode).charAt(0).toUpperCase(),
+const resolvedUnit = String(resolvedUnitFromKode ?? satuan ?? "").trim();
+
+return {
+  id: `${sourceKey}-${String(kode)}`,
+  label: String(kode),
+  indicatorName: String(deskripsi),
+  groupCode: toShortCode(sourceKey, kode, deskripsi),
+  source: sourceKey,
+  apiCode: String(kode),
+  apiFreqPrefix: String(kode).charAt(0).toUpperCase(),
+  valueUnitLabel: resolvedUnit,
+  growthUnitLabel: "%",
       rawFrequency:
         monthly.periods.length > 0
           ? "monthly"
@@ -954,16 +999,18 @@ export const buildDynamicDatasetFromApi = async ({
   source,
   kode,
   deskripsi,
+  satuan = "",
 }) => {
-  return buildGenericDatasetFromApi({ source, kode, deskripsi });
+  return buildGenericDatasetFromApi({ source, kode, deskripsi, satuan });
 };
 
 export const buildStaticDatasetFromApi = async ({
   source,
   kode,
   deskripsi,
+  satuan = "",
 }) => {
-  return buildGenericDatasetFromApi({ source, kode, deskripsi });
+  return buildGenericDatasetFromApi({ source, kode, deskripsi, satuan });
 };
 
 export const buildPdbStaticDatasetFromComponent = async ({
@@ -974,29 +1021,31 @@ export const buildPdbStaticDatasetFromComponent = async ({
   try {
     const jenis = measure === "nilai" ? "ADHB" : "ADHK";
 
-const [
-  quarterlyNilai,
-  yearlyNilai,
-  qtoq,
-  yony,
-  ctoc,
-  annual,
-] = await Promise.all([
-  fetchFirstWorkingSeriesFromEndpoints({
-    endpoints: [
-      SOURCE_ENDPOINTS.pdb.timeseries,
-      SOURCE_ENDPOINTS.pdb.chart,
-      SOURCE_ENDPOINTS.pdb.quarter,
-      SOURCE_ENDPOINTS.pdb.quarterChart,
-    ],
-    configBuilder: () => ({
-      params: { kode, jenis },
-    }),
-    normalizer: (payload) =>
-      normalizeValuePayload(payload, {
-        quarterPeriodNormalization: true,
+    const [
+      resolvedUnitFromKode,
+      quarterlyNilai,
+      yearlyNilai,
+      qtoq,
+      yony,
+      ctoc,
+      annual,
+    ] = await Promise.all([
+      fetchUnitBySource("pdb", kode),
+      fetchFirstWorkingSeriesFromEndpoints({
+        endpoints: [
+          SOURCE_ENDPOINTS.pdb.chart,
+          SOURCE_ENDPOINTS.pdb.timeseries,
+          SOURCE_ENDPOINTS.pdb.quarterChart,
+          SOURCE_ENDPOINTS.pdb.quarter,
+        ],
+        configBuilder: () => ({
+          params: { kode, jenis },
+        }),
+        normalizer: (payload) =>
+          normalizeValuePayload(payload, {
+            quarterPeriodNormalization: true,
+          }),
       }),
-  }),
 
       fetchFirstWorkingSeriesFromEndpoints({
         endpoints: [
@@ -1050,14 +1099,30 @@ const [
       }),
     ]);
 
+    const resolvedUnit = String(resolvedUnitFromKode ?? "").trim();
+
     return {
       id: `pdb-static-${String(kode)}-${jenis}`,
       label: String(kode),
       indicatorName: String(deskripsi),
+      deskripsi: String(deskripsi),
+      kode: String(kode),
+      sourceCode: String(kode),
+      satuan: resolvedUnit,
+      unit: resolvedUnit,
       groupCode: String(kode),
       source: "pdb",
       apiCode: String(kode),
       apiFreqPrefix: String(kode).charAt(0).toUpperCase(),
+      valueUnitLabel: resolvedUnit,
+      growthUnitLabel: "%",
+      meta: {
+        kode: String(kode),
+        deskripsi: String(deskripsi),
+        satuan: resolvedUnit,
+        unit: resolvedUnit,
+        source: "pdb",
+      },
       rawFrequency:
         (quarterlyNilai?.periods?.length ?? 0) > 0
           ? "quarterly"
@@ -1077,6 +1142,7 @@ const [
       growth: {
         monthly: {
           mtom: emptySeries(),
+          yony_m: emptySeries(),
           yony: emptySeries(),
           ytod: emptySeries(),
         },
@@ -1113,11 +1179,12 @@ export const getGlobalSourceOptions = () =>
  */
 export const fetchPkrtIndicators = async () => fetchIndicatorsBySource("pkrt");
 
-export const buildDatasetFromApi = async ({ kode, deskripsi }) =>
+export const buildDatasetFromApi = async ({ kode, deskripsi, satuan = "" }) =>
   buildDynamicDatasetFromApi({
     source: "pkrt",
     kode,
     deskripsi,
+    satuan,
   });
 
 export default api;
