@@ -122,7 +122,7 @@ const VALUE_KEY_PRIORITY = [
 const REQUEST_TYPES = {
   monthly: {
     mtom: "mtom",
-    yony: "yony",
+    yony: "yony_m",
     ytod: "ytod",
   },
   quarterly: {
@@ -974,7 +974,7 @@ return {
       growth: {
         monthly: {
           mtom: mtom ?? emptySeries(),
-          yony: monthlyYony ?? emptySeries(),
+          yony_m: monthlyYony ?? emptySeries(),
           ytod: ytod ?? emptySeries(),
         },
         quarterly: {
@@ -1143,7 +1143,7 @@ export const buildPdbStaticDatasetFromComponent = async ({
         monthly: {
           mtom: emptySeries(),
           yony_m: emptySeries(),
-          yony: emptySeries(),
+          
           ytod: emptySeries(),
         },
         quarterly: {

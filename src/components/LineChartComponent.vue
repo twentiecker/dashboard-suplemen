@@ -35,6 +35,14 @@ const getSeriesByConfig = (dataset, cfg) => {
     return dataset?.growth?.yearly?.data ?? [];
   }
 
+  if (aggregation === "monthly" && method === "yony") {
+    return (
+      dataset?.growth?.monthly?.yony_m?.data ??
+      dataset?.growth?.monthly?.yony?.data ??
+      []
+    );
+  }
+
   return dataset?.growth?.[aggregation]?.[method]?.data ?? [];
 };
 

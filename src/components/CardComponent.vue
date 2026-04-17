@@ -59,7 +59,7 @@ const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
   if (aggregation === "monthly") {
     return (
       hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
-      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony_m) ||
       hasValidSeriesData(dataset?.growth?.monthly?.ytod)
     );
   }
@@ -104,11 +104,19 @@ const getSeriesByConfig = (dataset, cfg) => {
     };
   }
 
-  if (aggregation === "yearly") {
-    return dataset?.growth?.yearly ?? { data: [], periods: [] };
-  }
+if (aggregation === "yearly") {
+  return dataset?.growth?.yearly ?? { data: [], periods: [] };
+}
 
-  return dataset?.growth?.[aggregation]?.[method] ?? { data: [], periods: [] };
+if (aggregation === "monthly" && method === "yony") {
+  return (
+    dataset?.growth?.monthly?.yony_m ??
+    dataset?.growth?.monthly?.yony ??
+    { data: [], periods: [] }
+  );
+}
+
+return dataset?.growth?.[aggregation]?.[method] ?? { data: [], periods: [] };
 };
 
 const preparedSeries = computed(() => getSeriesByConfig(props.datasets, config.value));
@@ -292,9 +300,9 @@ const onMethodChange = (e) => {
       style="grid-template-columns: minmax(0,1fr) 56px 60px 26px; column-gap:4px;"
     >
       <div class="min-w-0">
-        <h1 class="truncate text-[14px] font-semibold theme-text" :title="datasets.indicatorName">
+        <h2 class="truncate text-[14px] font-semibold theme-text" :title="datasets.indicatorName">
           {{ datasets.indicatorName }}
-        </h1>
+        </h2>
 
         <p class="truncate text-[14px] font-semibold theme-text mt-[2px]">
           {{ datasets.groupCode }}
@@ -308,9 +316,9 @@ const onMethodChange = (e) => {
       </div>
 
       <div class="w-[60px] text-right">
-        <h1 class="text-[14px] font-semibold leading-tight theme-text">
+        <h2 class="text-[14px] font-semibold leading-tight theme-text">
           {{ displayValue }}
-        </h1>
+        </h2>
 
         <p
           class="text-[14px] font-semibold leading-tight"

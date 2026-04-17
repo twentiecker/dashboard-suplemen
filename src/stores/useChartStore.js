@@ -63,7 +63,7 @@ const hasAggregationData = (dataset, aggregation, measure = "nilai") => {
   if (aggregation === "monthly") {
     return (
       hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
-      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
+      hasValidSeriesData(dataset?.growth?.monthly?.yony_m) ||
       hasValidSeriesData(dataset?.growth?.monthly?.ytod)
     );
   }

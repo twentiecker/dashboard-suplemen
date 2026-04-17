@@ -89,7 +89,7 @@ const activeStaticDatasetRef = ref(null);
 const dynamicIndicatorUnitMap = ref({});
 
 const componentRuleMode = ref("admin");
-// pilihan: admin | pkrt | pkp | pmtb | eksim
+// pilihan: admin | pkrt | pkp | pmtb | xm
 
 const dynamicDatasetCache = new Map();
 const staticDatasetCache = new Map();
@@ -386,7 +386,7 @@ const resolveHeaderSource = (headerText = "") => {
   if (acronym === "PKRT") return "pkrt";
   if (acronym === "PKP") return "pkp";
   if (acronym === "PMTB") return "pmtb";
-  if (acronym === "EKSPOR" || acronym === "IMPOR") return "eksim";
+  if (acronym === "EKSPOR" || acronym === "IMPOR") return "xm";
 
   return "";
 };
@@ -936,8 +936,8 @@ const isAllowedByComponentRule = (item, ruleMode) => {
 
   const source = String(item?.mappedSource ?? "").toLowerCase();
 
-  if (mode === "eksim") {
-    return source === "eksim";
+  if (mode === "xm") {
+    return source === "xm";
   }
 
   return source === mode;
