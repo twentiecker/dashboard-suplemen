@@ -300,6 +300,21 @@ const maybeNormalizeQuarterPeriods = (periods = []) => {
   return periods.map(convertMonthlyQuarterMarkerToQuarter);
 };
 
+const isQuarterPeriodValue = (period) => {
+  const text = String(period ?? "").trim().toUpperCase();
+
+  return (
+    /^\d{4}Q[1-4]$/.test(text) ||
+    /^(\d{4})M(3|03|6|06|9|09|12)$/.test(text)
+  );
+};
+
+const isQuarterSeries = (series) => {
+  if (!hasSeriesData(series)) return false;
+
+  return series.periods.every((period) => isQuarterPeriodValue(period));
+};
+
 /**
  * =========================================================
  * SERIES PICKER
@@ -645,6 +660,7 @@ const fetchFirstWorkingSeriesFromEndpoints = async ({
   endpoints = [],
   configBuilder,
   normalizer,
+  validator,
 }) => {
   for (const endpoint of uniqueTruthy(endpoints)) {
     const result = await safe(async () => {
@@ -652,7 +668,10 @@ const fetchFirstWorkingSeriesFromEndpoints = async ({
       return normalizer(data);
     });
 
-    if (hasSeriesData(result)) return result;
+    if (!hasSeriesData(result)) continue;
+    if (typeof validator === "function" && !validator(result)) continue;
+
+    return result;
   }
 
   return emptySeries();
@@ -812,24 +831,16 @@ const fetchQuarterlyNilaiBySource = async (source, kode) => {
   const config = getSourceConfig(source);
   if (!config) return emptySeries();
 
-  if (isQuarterOnlyCode(kode)) {
-    return fetchFirstWorkingSeriesFromEndpoints({
-      endpoints: [config.quarterChart, config.quarter, config.chart, config.timeseries],
-      configBuilder: () => getKodeParams(kode),
-      normalizer: (payload) =>
-        normalizeValuePayload(payload, {
-          quarterPeriodNormalization: true,
-        }),
-    });
-  }
-
   return fetchFirstWorkingSeriesFromEndpoints({
-    endpoints: [config.quarterChart, config.quarter, config.chart],
+    endpoints: isQuarterOnlyCode(kode)
+      ? [config.quarterChart, config.quarter, config.chart, config.timeseries]
+      : [config.quarterChart, config.quarter],
     configBuilder: () => getKodeParams(kode),
     normalizer: (payload) =>
       normalizeValuePayload(payload, {
         quarterPeriodNormalization: true,
       }),
+    validator: isQuarterSeries,
   });
 };
 

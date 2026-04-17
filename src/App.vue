@@ -386,7 +386,7 @@ const resolveHeaderSource = (headerText = "") => {
   if (acronym === "PKRT") return "pkrt";
   if (acronym === "PKP") return "pkp";
   if (acronym === "PMTB") return "pmtb";
-  if (acronym === "EKSPOR" || acronym === "IMPOR") return "xm";
+  if (acronym === "EKSPOR" || acronym === "IMPOR") return "eksim";
 
   return "";
 };
@@ -929,6 +929,7 @@ const buildPdbComponentMappings = (items = []) => {
   });
 };
 
+
 const isAllowedByComponentRule = (item, ruleMode) => {
   const mode = String(ruleMode ?? "admin").toLowerCase();
 
@@ -937,7 +938,7 @@ const isAllowedByComponentRule = (item, ruleMode) => {
   const source = String(item?.mappedSource ?? "").toLowerCase();
 
   if (mode === "xm") {
-    return source === "xm";
+    return source === "eksim";
   }
 
   return source === mode;
