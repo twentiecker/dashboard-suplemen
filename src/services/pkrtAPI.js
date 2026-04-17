@@ -317,6 +317,52 @@ const isQuarterSeries = (series) => {
 
 /**
  * =========================================================
+ * AGGREGATION AVAILABILITY
+ * aturan:
+ * - freq M + konversi NaN  => monthly true, quarterly false, yearly false
+ * - freq Q + konversi NaN  => monthly false, quarterly true, yearly false
+ * - freq Y + konversi NaN  => monthly false, quarterly false, yearly true
+ * - selain NaN             => mengikuti freq normal turunannya boleh
+ * =========================================================
+ */
+const buildAggregationAvailability = ({ freq = "", konversi = "" } = {}) => {
+  const normalizedFreq = String(freq ?? "").trim().toUpperCase();
+  const normalizedKonversi = String(konversi ?? "").trim().toUpperCase();
+  const isNaNConversion = normalizedKonversi === "NAN";
+
+  if (normalizedFreq === "M") {
+    return {
+      allowMonthly: true,
+      allowQuarterly: !isNaNConversion,
+      allowYearly: !isNaNConversion,
+    };
+  }
+
+  if (normalizedFreq === "Q") {
+    return {
+      allowMonthly: false,
+      allowQuarterly: true,
+      allowYearly: !isNaNConversion,
+    };
+  }
+
+  if (normalizedFreq === "Y" || normalizedFreq === "A") {
+    return {
+      allowMonthly: false,
+      allowQuarterly: false,
+      allowYearly: true,
+    };
+  }
+
+  return {
+    allowMonthly: true,
+    allowQuarterly: true,
+    allowYearly: true,
+  };
+};
+
+/**
+ * =========================================================
  * SERIES PICKER
  * =========================================================
  */
@@ -745,40 +791,51 @@ const toShortCode = (source, kode, deskripsi) => {
   return `${prefix}-${acronym || String(kode ?? "").toUpperCase()}`;
 };
 
-const fetchUnitBySource = async (source, kode) => {
+const fetchKodeMetaBySource = async (source, kode) => {
   const config = getSourceConfig(source);
-  if (!config?.kode) return "";
+  if (!config?.kode) {
+    return {
+      satuan: "",
+      freq: "",
+      konversi: "",
+    };
+  }
 
   const result = await safe(async () => {
     const { data } = await cachedGet(config.kode, getKodeParams(kode));
 
-    const extractUnit = (item) =>
-      String(
+    const pickItem = (payload) => {
+      if (Array.isArray(payload)) return payload[0] ?? null;
+      if (Array.isArray(payload?.data)) return payload.data[0] ?? null;
+      if (payload && typeof payload === "object") return payload;
+      return null;
+    };
+
+    const item = pickItem(data);
+
+    return {
+      satuan: String(
         item?.satuan ??
         item?.unit ??
         item?.satuan_data ??
         item?.satuan_indikator ??
         ""
-      ).trim();
-
-    if (Array.isArray(data)) {
-      const found = data.find((item) => extractUnit(item));
-      return found ? extractUnit(found) : "";
-    }
-
-    if (Array.isArray(data?.data)) {
-      const found = data.data.find((item) => extractUnit(item));
-      return found ? extractUnit(found) : "";
-    }
-
-    if (data && typeof data === "object") {
-      return extractUnit(data);
-    }
-
-    return "";
+      ).trim(),
+      freq: String(item?.freq ?? "").trim().toUpperCase(),
+      konversi: String(item?.konversi ?? "").trim(),
+    };
   });
 
-  return result ?? "";
+  return result ?? {
+    satuan: "",
+    freq: "",
+    konversi: "",
+  };
+};
+
+const fetchUnitBySource = async (source, kode) => {
+  const meta = await fetchKodeMetaBySource(source, kode);
+  return String(meta?.satuan ?? "").trim();
 };
 
 /**
@@ -916,54 +973,77 @@ const buildGenericDatasetFromApi = async ({
     const sourceKey = String(source ?? "").toLowerCase();
     const quarterOnly = isQuarterOnlyCode(kode);
 
-const [
-  resolvedUnitFromKode,
-  monthlyNilai,
-  quarterlyNilai,
-  yearlyNilai,
-  mtom,
-  monthlyYony,
-  ytod,
-  qtoq,
-  quarterlyYony,
-  ctoc,
-  annual,
-] = await Promise.all([
-  safe(() => fetchUnitBySource(sourceKey, kode)),
-  safe(() => fetchMonthlyNilaiBySource(sourceKey, kode)),
-  safe(() => fetchQuarterlyNilaiBySource(sourceKey, kode)),
-  safe(() => fetchAnnualNilaiBySource(sourceKey, kode)),
-  quarterOnly
-    ? Promise.resolve(emptySeries())
-    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
-  quarterOnly
-    ? Promise.resolve(emptySeries())
-    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
-  quarterOnly
-    ? Promise.resolve(emptySeries())
-    : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
-  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "qtoq")),
-  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "yony")),
-  safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "ctoc")),
-  safe(() => fetchAnnualGrowthBySource(sourceKey, kode)),
-]);
+    const [
+      kodeMeta,
+      monthlyNilai,
+      quarterlyNilai,
+      yearlyNilai,
+      mtom,
+      monthlyYony,
+      ytod,
+      qtoq,
+      quarterlyYony,
+      ctoc,
+      annual,
+    ] = await Promise.all([
+      safe(() => fetchKodeMetaBySource(sourceKey, kode)),
+      safe(() => fetchMonthlyNilaiBySource(sourceKey, kode)),
+      safe(() => fetchQuarterlyNilaiBySource(sourceKey, kode)),
+      safe(() => fetchAnnualNilaiBySource(sourceKey, kode)),
+      quarterOnly
+        ? Promise.resolve(emptySeries())
+        : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "mtom")),
+      quarterOnly
+        ? Promise.resolve(emptySeries())
+        : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "yony")),
+      quarterOnly
+        ? Promise.resolve(emptySeries())
+        : safe(() => fetchMonthlyGrowthByType(sourceKey, kode, "ytod")),
+      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "qtoq")),
+      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "yony")),
+      safe(() => fetchQuarterlyGrowthByType(sourceKey, kode, "ctoc")),
+      safe(() => fetchAnnualGrowthBySource(sourceKey, kode)),
+    ]);
 
     const monthly = monthlyNilai ?? emptySeries();
     const quarterly = quarterlyNilai ?? emptySeries();
     const yearly = yearlyNilai ?? emptySeries();
 
-const resolvedUnit = String(resolvedUnitFromKode ?? satuan ?? "").trim();
+    const resolvedUnit = String(kodeMeta?.satuan ?? satuan ?? "").trim();
+    const resolvedFreq = String(kodeMeta?.freq ?? "").trim().toUpperCase();
+    const resolvedKonversi = String(kodeMeta?.konversi ?? "").trim();
+    const aggregationAvailability = buildAggregationAvailability({
+      freq: resolvedFreq,
+      konversi: resolvedKonversi,
+    });
 
-return {
-  id: `${sourceKey}-${String(kode)}`,
-  label: String(kode),
-  indicatorName: String(deskripsi),
-  groupCode: toShortCode(sourceKey, kode, deskripsi),
-  source: sourceKey,
-  apiCode: String(kode),
-  apiFreqPrefix: String(kode).charAt(0).toUpperCase(),
-  valueUnitLabel: resolvedUnit,
-  growthUnitLabel: "%",
+    return {
+      id: `${sourceKey}-${String(kode)}`,
+      label: String(kode),
+      indicatorName: String(deskripsi),
+      groupCode: toShortCode(sourceKey, kode, deskripsi),
+      source: sourceKey,
+      apiCode: String(kode),
+      apiFreqPrefix: String(kode).charAt(0).toUpperCase(),
+      valueUnitLabel: resolvedUnit,
+      growthUnitLabel: "%",
+
+      kodeMeta: {
+        freq: resolvedFreq,
+        konversi: resolvedKonversi,
+      },
+
+      aggregationAvailability,
+
+      meta: {
+        kode: String(kode),
+        deskripsi: String(deskripsi),
+        satuan: resolvedUnit,
+        freq: resolvedFreq,
+        konversi: resolvedKonversi,
+        source: sourceKey,
+      },
+
       rawFrequency:
         monthly.periods.length > 0
           ? "monthly"
@@ -972,16 +1052,19 @@ return {
             : yearly.periods.length > 0
               ? "yearly"
               : "unknown",
+
       derivedPeriods: {
         monthly: monthly.periods,
         quarterly: quarterly.periods,
         yearly: yearly.periods,
       },
+
       series: {
         monthly: monthly.data,
         quarterly: quarterly.data,
         yearly: yearly.data,
       },
+
       growth: {
         monthly: {
           mtom: mtom ?? emptySeries(),
@@ -995,6 +1078,7 @@ return {
         },
         yearly: annual ?? emptySeries(),
       },
+
       tension: 0.4,
     };
   } catch (error) {
@@ -1154,7 +1238,6 @@ export const buildPdbStaticDatasetFromComponent = async ({
         monthly: {
           mtom: emptySeries(),
           yony_m: emptySeries(),
-          
           ytod: emptySeries(),
         },
         quarterly: {

@@ -648,6 +648,18 @@ const hasStaticGrowthYearly = computed(() => {
 const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
   if (!dataset) return false;
 
+  if (aggregation === "monthly" && dataset?.aggregationAvailability?.allowMonthly === false) {
+    return false;
+  }
+
+  if (aggregation === "quarterly" && dataset?.aggregationAvailability?.allowQuarterly === false) {
+    return false;
+  }
+
+  if (aggregation === "yearly" && dataset?.aggregationAvailability?.allowYearly === false) {
+    return false;
+  }
+
   if (measure === "nilai") {
     if (aggregation === "monthly") {
       return hasValidArrayData(dataset?.series?.monthly);
@@ -1056,7 +1068,20 @@ const primaryRawConfig = computed(() => {
 const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? "");
 const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? "");
 const primaryMethod = computed(() => primaryRawConfig.value?.method ?? "");
+const allowPrimaryMonthlyByMeta = computed(() => {
+  const value = primaryDataset.value?.aggregationAvailability?.allowMonthly;
+  return typeof value === "boolean" ? value : true;
+});
 
+const allowPrimaryQuarterlyByMeta = computed(() => {
+  const value = primaryDataset.value?.aggregationAvailability?.allowQuarterly;
+  return typeof value === "boolean" ? value : true;
+});
+
+const allowPrimaryYearlyByMeta = computed(() => {
+  const value = primaryDataset.value?.aggregationAvailability?.allowYearly;
+  return typeof value === "boolean" ? value : true;
+});
 const isLeftUiReady = computed(() => {
   if (!activeMappedSource.value) return true;
   if (!cards.value.length) return false;
@@ -1203,7 +1228,13 @@ const loadCardsFromMappedSource = async () => {
       chartStore.initPrimary(first);
       chartStore.setMeasure(first.id, "nilai");
 
-      if (
+      if (first?.aggregationAvailability?.allowMonthly) {
+        chartStore.setAggregation(first.id, "monthly");
+      } else if (first?.aggregationAvailability?.allowQuarterly) {
+        chartStore.setAggregation(first.id, "quarterly");
+      } else if (first?.aggregationAvailability?.allowYearly) {
+        chartStore.setAggregation(first.id, "yearly");
+      } else if (
         String(first?.apiFreqPrefix ?? first?.apiCode ?? "")
           .charAt(0)
           .toUpperCase() !== "Q" &&
@@ -1218,6 +1249,7 @@ const loadCardsFromMappedSource = async () => {
       } else {
         chartStore.setAggregation(first.id, "yearly");
       }
+
     } else {
       cards.value = [];
       chartStore.selectedDataset = [];
@@ -1544,12 +1576,17 @@ const getEffectiveAggregation = (dataset) => {
   const id = String(dataset.id);
   const rawConfig = chartStore.compareConfigs[id] ?? null;
 
-  return rawConfig?.aggregation ??
-    (dataset.rawFrequency === "monthly"
-      ? "monthly"
-      : dataset.rawFrequency === "quarterly"
-        ? "quarterly"
-        : "yearly");
+  if (rawConfig?.aggregation) return rawConfig.aggregation;
+
+  if (dataset?.aggregationAvailability?.allowMonthly) return "monthly";
+  if (dataset?.aggregationAvailability?.allowQuarterly) return "quarterly";
+  if (dataset?.aggregationAvailability?.allowYearly) return "yearly";
+
+  return dataset.rawFrequency === "monthly"
+    ? "monthly"
+    : dataset.rawFrequency === "quarterly"
+      ? "quarterly"
+      : "yearly";
 };
 
 const getAxisLevelCount = (aggregations) => {
@@ -1633,6 +1670,7 @@ const getAxisLevelCountForCardSelection = ({
 
 const isPrimaryMonthlyDisabled = computed(() => {
   if (!primaryDataset.value) return true;
+  if (!allowPrimaryMonthlyByMeta.value) return true;
   if (!canChoosePrimaryMonthly.value) return true;
   if (!isGabung.value) return false;
   if (!primaryMeasure.value) return false;
@@ -1645,6 +1683,7 @@ const isPrimaryMonthlyDisabled = computed(() => {
 
 const isPrimaryQuarterlyDisabled = computed(() => {
   if (!primaryDataset.value) return true;
+  if (!allowPrimaryQuarterlyByMeta.value) return true;
   if (!canChoosePrimaryQuarterly.value) return true;
   if (!isGabung.value) return false;
   if (!primaryMeasure.value) return false;
@@ -1657,6 +1696,7 @@ const isPrimaryQuarterlyDisabled = computed(() => {
 
 const isPrimaryYearlyDisabled = computed(() => {
   if (!primaryDataset.value) return true;
+  if (!allowPrimaryYearlyByMeta.value) return true;
   if (!canChoosePrimaryYearly.value) return true;
   if (!isGabung.value) return false;
   if (!primaryMeasure.value) return false;
