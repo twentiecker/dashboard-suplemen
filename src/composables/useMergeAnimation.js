@@ -15,11 +15,19 @@ export function useMergeAnimation({
   const snapshotPiecesVisible = ref(false);
   const snapshotPieces = ref([]);
 
+  const getRootElement = (target) => {
+    if (!target) return null;
+    return target.$el ?? target;
+  };
+
   const buildSnapshotPieces = async () => {
     await nextTick();
 
-    const canvas = rightPanelRef.value?.querySelector("canvas");
-    const leftBox = leftPanelRef.value?.getBoundingClientRect();
+    const rightRoot = getRootElement(rightPanelRef.value);
+    const leftRoot = getRootElement(leftPanelRef.value);
+
+    const canvas = rightRoot?.querySelector?.("canvas");
+    const leftBox = leftRoot?.getBoundingClientRect?.();
 
     if (!canvas || !leftBox) {
       snapshotPieces.value = [];

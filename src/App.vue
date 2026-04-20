@@ -2,6 +2,8 @@
 import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useChartStore } from "./stores/useChartStore";
 import CardComponent from "./components/CardComponent.vue";
+import LeftPanel from "./components/LeftPanel.vue";
+import RightPanel from "./components/RightPanel.vue";
 
 import {
   provinceOptions,
@@ -11,10 +13,7 @@ import {
   TOTAL_BAR_COLOR,
 } from "./constants/appChartConstants";
 
-import {
-  wait,
-  waitUntil,
-} from "./utils/asyncHelpers";
+import { wait, waitUntil } from "./utils/asyncHelpers";
 
 import {
   normalizeTextKey,
@@ -73,10 +72,7 @@ const {
 });
 
 const {
-  activeSource,
-  activeStaticDatasetRef,
   activeStaticDataset,
-  activeStaticIndicator,
   activeMappedSource,
   dynamicIndicatorUnitMap,
   cards,
@@ -84,7 +80,6 @@ const {
   filteredPdbIndicatorOptions,
   globalComponentOptions,
   loadPdbComponentOptions,
-  loadCardsFromMappedSource,
   loadActiveStaticDataset,
   reloadBySelectedComponent,
   resetAllDataState,
@@ -96,6 +91,7 @@ const {
 });
 
 const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
+
 const primaryMeasure = computed(() => {
   if (!primaryDataset.value) return "";
   const id = String(primaryDataset.value.id);
@@ -114,12 +110,8 @@ const hasStaticGrowthQuarterlyBridge = ref(false);
 const hasStaticGrowthYearlyBridge = ref(false);
 
 const {
-  primaryRawConfig,
   primaryAggregation,
   primaryMethod,
-  allowPrimaryMonthlyByMeta,
-  allowPrimaryQuarterlyByMeta,
-  allowPrimaryYearlyByMeta,
   canChoosePrimaryMonthly,
   canChoosePrimaryQuarterly,
   canChoosePrimaryYearly,
@@ -130,12 +122,6 @@ const {
   showPrimaryMethodFilter,
   showStaticPeriodFilter,
   showStaticMethodFilter,
-  getEffectiveAggregation,
-  getAxisLevelCount,
-  combineTargetAggregations,
-  combineTargetAxisLevels,
-  getAxisLevelCountFromSelections,
-  getAxisLevelCountForCardSelection,
   isPrimaryMonthlyDisabled,
   isPrimaryQuarterlyDisabled,
   isPrimaryYearlyDisabled,
@@ -143,7 +129,6 @@ const {
   isStaticYearlyDisabled,
   isCardMonthlyDisabled,
   isCardQuarterlyDisabled,
-  isCardYearlyDisabled,
   isCombineDisabled,
   combineDisabledMessage,
 } = useFilterLogic({
@@ -192,10 +177,116 @@ watch(
   { immediate: true }
 );
 
+function getDatasetUnitLabel(dataset, measure = "nilai") {
+  if (measure === "pertumbuhan") return "%";
+
+  const codeCandidates = [
+    dataset?.apiCode,
+    dataset?.kode,
+    dataset?.code,
+    dataset?.sourceCode,
+    dataset?.meta?.kode,
+    dataset?.meta?.code,
+  ]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+
+  const nameCandidates = [
+    dataset?.indicatorName,
+    dataset?.deskripsi,
+    dataset?.label,
+    dataset?.name,
+    dataset?.meta?.deskripsi,
+    dataset?.meta?.label,
+  ]
+    .map((v) => normalizeTextKey(v))
+    .filter(Boolean);
+
+  let rawUnit =
+    dataset?.valueUnitLabel ??
+    dataset?.satuan ??
+    dataset?.unit ??
+    dataset?.satuanLabel ??
+    dataset?.meta?.satuan ??
+    dataset?.meta?.unit ??
+    "";
+
+  if (!rawUnit) {
+    for (const code of codeCandidates) {
+      if (dynamicIndicatorUnitMap.value[code]) {
+        rawUnit = dynamicIndicatorUnitMap.value[code];
+        break;
+      }
+    }
+  }
+
+  if (!rawUnit) {
+    for (const name of nameCandidates) {
+      if (dynamicIndicatorUnitMap.value[`name:${name}`]) {
+        rawUnit = dynamicIndicatorUnitMap.value[`name:${name}`];
+        break;
+      }
+    }
+  }
+
+  return normalizeUnitLabel(rawUnit, "Nilai");
+}
+
+function getLegendLabelWithUnit(dataset, measure = "nilai") {
+  const name = getDatasetDisplayName(dataset);
+  const unit = getDatasetUnitLabel(dataset, measure);
+  return unit ? `${name} (${unit})` : name;
+}
+
 const activeMonthlyMethod = computed(() => {
   if (primaryMeasure.value !== "pertumbuhan" || primaryAggregation.value !== "monthly") return "";
   return primaryMethod.value ?? "";
 });
+
+const isBarVsBarMerge = computed(() =>
+  isGabung.value &&
+  dynamicChartType.value === "bar" &&
+  staticChartType.value === "bar"
+);
+
+const isDualBarMerge = computed(() =>
+  isGabung.value &&
+  dynamicChartType.value === "bar" &&
+  staticChartType.value === "bar"
+);
+
+const showCombineBarModeFilter = computed(() => isBarVsBarMerge.value);
+const showDynamicChartTypeFilter = computed(() => !isGabung.value);
+const showStaticChartTypeFilter = computed(() => !isGabung.value);
+
+const canUsePeriodStackMerge = computed(() =>
+  isDualBarMerge.value &&
+  primaryMeasure.value === "nilai" &&
+  staticMeasure.value === "nilai" &&
+  !!primaryAggregation.value &&
+  !!staticPeriod.value &&
+  !hasIncompatibleLeftSeries.value &&
+  (
+    (primaryAggregation.value === "monthly" && staticPeriod.value === "quarterly") ||
+    (primaryAggregation.value === "monthly" && staticPeriod.value === "yearly") ||
+    (primaryAggregation.value === "quarterly" && staticPeriod.value === "yearly")
+  )
+);
+
+const showStackBarFilter = computed(() =>
+  isGabung.value &&
+  isDualBarMerge.value &&
+  (
+    (primaryAggregation.value === "monthly" && staticPeriod.value === "quarterly") ||
+    (primaryAggregation.value === "monthly" && staticPeriod.value === "yearly") ||
+    (primaryAggregation.value === "quarterly" && staticPeriod.value === "yearly") ||
+    (primaryAggregation.value === "yearly" && staticPeriod.value === "yearly")
+  )
+);
+
+const useStackPeriodMerge = computed(() =>
+  canUsePeriodStackMerge.value && combineBarMode.value === "stack"
+);
 
 const shouldStackQuarterly = computed(() =>
   !useStackPeriodMerge.value &&
@@ -229,10 +320,6 @@ const chartDataLBridge = ref({
   datasets: [],
 });
 
-const useStackPeriodMerge = computed(() =>
-  canUsePeriodStackMerge.value && combineBarMode.value === "stack"
-);
-
 const {
   theme,
   hasStaticNilaiQuarterly,
@@ -240,24 +327,10 @@ const {
   hasStaticGrowthQuarterly,
   hasStaticGrowthYearly,
   staticSeriesMeta,
-  leftPreparedDynamicSeries,
-  compatibleLeftSeries,
   activeLeftSeries,
-  hasGrowthSeriesLeft,
-  hasValueSeriesLeft,
   hasMixedMeasureKindsLeft,
-  leftPrimaryUnitTitle,
-  leftSecondaryUnitTitle,
-  staticAxisTitle,
   activeDatasetOrderMap,
   hasIncompatibleLeftSeries,
-  hasMonthlySeriesLeft,
-  hasQuarterlySeriesLeft,
-  hasYearlySeriesLeft,
-  isMixedMonthlyQuarterlyAxis,
-  leftMonthlyAxisPeriods,
-  leftQuarterlyAxisPeriods,
-  leftYearlyAxisPeriods,
   chartOptionsL,
   chartOptionsR,
 } = useChartLogic({
@@ -281,6 +354,57 @@ const {
   getDatasetUnitLabel,
 });
 
+watch(
+  () => [
+    isGabung.value,
+    dynamicChartType.value,
+    staticChartType.value,
+    primaryAggregation.value,
+    staticPeriod.value,
+    primaryMeasure.value,
+    staticMeasure.value,
+    hasIncompatibleLeftSeries.value,
+  ],
+  ([
+    merged,
+    leftType,
+    rightType,
+    leftAggregation,
+    rightAggregation,
+    leftMeasure,
+    rightMeasure,
+    hasIncompatible,
+  ]) => {
+    if (!merged) {
+      combineBarMode.value = "standard";
+      return;
+    }
+
+    if (hasIncompatible) {
+      combineBarMode.value = "standard";
+      return;
+    }
+
+    if (
+      leftType === "bar" &&
+      rightType === "bar" &&
+      leftMeasure === "nilai" &&
+      rightMeasure === "nilai" &&
+      (
+        (leftAggregation === "monthly" && rightAggregation === "quarterly") ||
+        (leftAggregation === "monthly" && rightAggregation === "yearly") ||
+        (leftAggregation === "quarterly" && rightAggregation === "yearly") ||
+        (leftAggregation === "yearly" && rightAggregation === "yearly")
+      )
+    ) {
+      combineBarMode.value = "stack";
+      return;
+    }
+
+    combineBarMode.value = "standard";
+  },
+  { immediate: true }
+);
 
 watch(
   [hasStaticNilaiQuarterly, hasStaticNilaiYearly, hasStaticGrowthQuarterly, hasStaticGrowthYearly],
@@ -375,160 +499,6 @@ const withPageBusy = async (fn) => {
     isPageBusy.value = false;
   }
 };
-
-function getDatasetUnitLabel(dataset, measure = "nilai") {
-  if (measure === "pertumbuhan") return "%";
-
-  const codeCandidates = [
-    dataset?.apiCode,
-    dataset?.kode,
-    dataset?.code,
-    dataset?.sourceCode,
-    dataset?.meta?.kode,
-    dataset?.meta?.code,
-  ]
-    .map((v) => String(v ?? "").trim())
-    .filter(Boolean);
-
-  const nameCandidates = [
-    dataset?.indicatorName,
-    dataset?.deskripsi,
-    dataset?.label,
-    dataset?.name,
-    dataset?.meta?.deskripsi,
-    dataset?.meta?.label,
-  ]
-    .map((v) => normalizeTextKey(v))
-    .filter(Boolean);
-
-  let rawUnit =
-    dataset?.valueUnitLabel ??
-    dataset?.satuan ??
-    dataset?.unit ??
-    dataset?.satuanLabel ??
-    dataset?.meta?.satuan ??
-    dataset?.meta?.unit ??
-    "";
-
-  if (!rawUnit) {
-    for (const code of codeCandidates) {
-      if (dynamicIndicatorUnitMap.value[code]) {
-        rawUnit = dynamicIndicatorUnitMap.value[code];
-        break;
-      }
-    }
-  }
-
-  if (!rawUnit) {
-    for (const name of nameCandidates) {
-      if (dynamicIndicatorUnitMap.value[`name:${name}`]) {
-        rawUnit = dynamicIndicatorUnitMap.value[`name:${name}`];
-        break;
-      }
-    }
-  }
-
-  return normalizeUnitLabel(rawUnit, "Nilai");
-}
-
-function getLegendLabelWithUnit(dataset, measure = "nilai") {
-  const name = getDatasetDisplayName(dataset);
-  const unit = getDatasetUnitLabel(dataset, measure);
-  return unit ? `${name} (${unit})` : name;
-}
-
-const isBarVsBarMerge = computed(() =>
-  isGabung.value &&
-  dynamicChartType.value === "bar" &&
-  staticChartType.value === "bar"
-);
-
-const isDualBarMerge = computed(() =>
-  isGabung.value &&
-  dynamicChartType.value === "bar" &&
-  staticChartType.value === "bar"
-);
-
-const showCombineBarModeFilter = computed(() => isBarVsBarMerge.value);
-const showDynamicChartTypeFilter = computed(() => !isGabung.value);
-const showStaticChartTypeFilter = computed(() => !isGabung.value);
-
-const canUsePeriodStackMerge = computed(() =>
-  isDualBarMerge.value &&
-  primaryMeasure.value === "nilai" &&
-  staticMeasure.value === "nilai" &&
-  !!primaryAggregation.value &&
-  !!staticPeriod.value &&
-  !hasIncompatibleLeftSeries.value &&
-  (
-    (primaryAggregation.value === "monthly" && staticPeriod.value === "quarterly") ||
-    (primaryAggregation.value === "monthly" && staticPeriod.value === "yearly") ||
-    (primaryAggregation.value === "quarterly" && staticPeriod.value === "yearly")
-  )
-);
-
-const showStackBarFilter = computed(() =>
-  isGabung.value &&
-  isDualBarMerge.value &&
-  (
-    (primaryAggregation.value === "monthly" && staticPeriod.value === "quarterly") ||
-    (primaryAggregation.value === "monthly" && staticPeriod.value === "yearly") ||
-    (primaryAggregation.value === "quarterly" && staticPeriod.value === "yearly") ||
-    (primaryAggregation.value === "yearly" && staticPeriod.value === "yearly")
-  )
-);
-
-watch(
-  () => [
-    isGabung.value,
-    dynamicChartType.value,
-    staticChartType.value,
-    primaryAggregation.value,
-    staticPeriod.value,
-    primaryMeasure.value,
-    staticMeasure.value,
-    hasIncompatibleLeftSeries.value,
-  ],
-  ([
-    merged,
-    leftType,
-    rightType,
-    leftAggregation,
-    rightAggregation,
-    leftMeasure,
-    rightMeasure,
-    hasIncompatible,
-  ]) => {
-    if (!merged) {
-      combineBarMode.value = "standard";
-      return;
-    }
-
-    if (hasIncompatible) {
-      combineBarMode.value = "standard";
-      return;
-    }
-
-    if (
-      leftType === "bar" &&
-      rightType === "bar" &&
-      leftMeasure === "nilai" &&
-      rightMeasure === "nilai" &&
-      (
-        (leftAggregation === "monthly" && rightAggregation === "quarterly") ||
-        (leftAggregation === "monthly" && rightAggregation === "yearly") ||
-        (leftAggregation === "quarterly" && rightAggregation === "yearly") ||
-        (leftAggregation === "yearly" && rightAggregation === "yearly")
-      )
-    ) {
-      combineBarMode.value = "stack";
-      return;
-    }
-
-    combineBarMode.value = "standard";
-  },
-  { immediate: true }
-);
 
 watch(
   [
@@ -1438,123 +1408,31 @@ const rightChartKey = computed(() => {
               'merge-absorb': isMerging && mergePhase === 'absorb'
             }"
           >
-            <div class="theme-filter-panel mb-3 rounded-lg border p-3">
-              <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
-                <div>
-                  <label class="theme-text-muted mb-1 block text-[12px]">Pilih Tampilan</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    :value="primaryMeasure ?? ''"
-                    @change="onPrimaryMeasureChange"
-                    :disabled="isPageBusy"
-                  >
-                    <option value="" disabled>Pilih tampilan</option>
-                    <option
-                      v-for="opt in FILTER_OPTIONS.measure"
-                      :key="opt.value"
-                      :value="opt.value"
-                    >
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                </div>
-
-                <div v-if="showPrimaryAggregationFilter">
-                  <label class="theme-text-muted mb-1 block text-[12px]">Pilih Periode</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    :value="primaryAggregation ?? ''"
-                    @change="onPrimaryAggregationChange"
-                    :disabled="isPageBusy"
-                  >
-                    <option value="" disabled>Pilih periode</option>
-                    <option value="monthly" :disabled="isPrimaryMonthlyDisabled">Bulanan</option>
-                    <option value="quarterly" :disabled="isPrimaryQuarterlyDisabled">Triwulanan</option>
-                    <option value="yearly" :disabled="isPrimaryYearlyDisabled">Tahunan</option>
-                  </select>
-                </div>
-
-                <div v-if="showPrimaryMethodFilter && primaryAggregation === 'monthly'">
-                  <label class="theme-text-muted mb-1 block text-[12px]">Metode Bulanan</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    :value="primaryMethod ?? ''"
-                    @change="onPrimaryMethodChange"
-                    :disabled="isPageBusy"
-                  >
-                    <option value="" disabled>Pilih metode</option>
-                    <option
-                      v-for="opt in FILTER_OPTIONS.monthlyMethods"
-                      :key="opt.value"
-                      :value="opt.value"
-                    >
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                </div>
-
-                <div v-if="showPrimaryMethodFilter && primaryAggregation === 'quarterly'">
-                  <label class="theme-text-muted mb-1 block text-[12px]">Metode Triwulanan</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    :value="primaryMethod ?? ''"
-                    @change="onPrimaryMethodChange"
-                    :disabled="isPageBusy"
-                  >
-                    <option value="" disabled>Pilih metode</option>
-                    <option
-                      v-for="opt in FILTER_OPTIONS.quarterlyMethods"
-                      :key="opt.value"
-                      :value="opt.value"
-                    >
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                </div>
-
-                <div v-show="showDynamicChartTypeFilter">
-                  <label class="theme-text-muted mb-1 block text-[12px]">Tipe Chart Dinamis</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    v-model="dynamicChartType"
-                    :disabled="isPageBusy"
-                  >
-                    <option
-                      v-for="opt in FILTER_OPTIONS.chartTypes"
-                      :key="opt.value"
-                      :value="opt.value"
-                    >
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                </div>
-
-                <div v-show="showStackBarFilter && showCombineBarModeFilter">
-                  <label class="theme-text-muted mb-1 block text-[12px]">Mode Bar Gabungan</label>
-                  <select
-                    class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                    v-model="combineBarMode"
-                    :disabled="isPageBusy"
-                  >
-                    <option
-                      v-for="opt in FILTER_OPTIONS.combineBarModes"
-                      :key="opt.value"
-                      :value="opt.value"
-                    >
-                      {{ opt.label }}
-                    </option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <Chart
-              :key="leftChartKey"
-              :type="dynamicChartType"
-              :data="chartDataL"
-              :options="chartOptionsL"
-              :plugins="[valueLabelPlugin]"
-              class="chart-left-dynamic h-120"
+            <LeftPanel
+              :is-page-busy="isPageBusy"
+              :show-primary-aggregation-filter="showPrimaryAggregationFilter"
+              :show-primary-method-filter="showPrimaryMethodFilter"
+              :show-dynamic-chart-type-filter="showDynamicChartTypeFilter"
+              :show-stack-bar-filter="showStackBarFilter"
+              :show-combine-bar-mode-filter="showCombineBarModeFilter"
+              :primary-measure="primaryMeasure"
+              :primary-aggregation="primaryAggregation"
+              :primary-method="primaryMethod"
+              :dynamic-chart-type="dynamicChartType"
+              :combine-bar-mode="combineBarMode"
+              :is-primary-monthly-disabled="isPrimaryMonthlyDisabled"
+              :is-primary-quarterly-disabled="isPrimaryQuarterlyDisabled"
+              :is-primary-yearly-disabled="isPrimaryYearlyDisabled"
+              :filter-options="FILTER_OPTIONS"
+              :left-chart-key="leftChartKey"
+              :chart-data-l="chartDataL"
+              :chart-options-l="chartOptionsL"
+              :value-label-plugin="valueLabelPlugin"
+              @primary-measure-change="onPrimaryMeasureChange"
+              @primary-aggregation-change="onPrimaryAggregationChange"
+              @primary-method-change="onPrimaryMethodChange"
+              @update:dynamic-chart-type="dynamicChartType = $event"
+              @update:combine-bar-mode="combineBarMode = $event"
             />
           </div>
 
@@ -1575,95 +1453,28 @@ const rightChartKey = computed(() => {
                 aria-hidden="true"
               ></div>
 
-              <div class="theme-filter-panel mb-3 rounded-lg border p-3">
-                <div class="grid grid-cols-1 gap-3 md:grid-cols-4">
-                  <div v-if="showStaticPeriodFilter">
-                    <label class="theme-text-muted mb-1 block text-[12px]">Pilih Tampilan</label>
-                    <select
-                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                      v-model="staticMeasure"
-                      :disabled="isPageBusy"
-                    >
-                      <option
-                        v-for="opt in FILTER_OPTIONS.measure"
-                        :key="opt.value"
-                        :value="opt.value"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-
-                  <div v-if="showStaticPeriodFilter">
-                    <label class="theme-text-muted mb-1 block text-[12px]">Pilih Periode</label>
-                    <select
-                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                      v-model="staticPeriod"
-                      :disabled="isPageBusy"
-                    >
-                      <option value="" disabled>Pilih periode</option>
-                      <option
-                        v-for="opt in FILTER_OPTIONS.staticPeriod"
-                        :key="opt.value"
-                        :value="opt.value"
-                        :disabled="opt.value === 'quarterly' ? isStaticQuarterlyDisabled : isStaticYearlyDisabled"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-
-                  <div v-if="showStaticMethodFilter">
-                    <label class="theme-text-muted mb-1 block text-[12px]">Metode</label>
-                    <select
-                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                      v-model="staticMethod"
-                      :disabled="isPageBusy"
-                    >
-                      <option value="" disabled>Pilih metode</option>
-                      <option
-                        v-for="opt in FILTER_OPTIONS.staticQuarterlyMethods"
-                        :key="opt.value"
-                        :value="opt.value"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-
-                  <div v-show="showStaticChartTypeFilter">
-                    <label class="theme-text-muted mb-1 block text-[12px]">Tipe Chart Statistik</label>
-                    <select
-                      class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
-                      v-model="staticChartType"
-                      :disabled="isPageBusy"
-                    >
-                      <option
-                        v-for="opt in FILTER_OPTIONS.chartTypes"
-                        :key="opt.value"
-                        :value="opt.value"
-                      >
-                        {{ opt.label }}
-                      </option>
-                    </select>
-                  </div>
-                </div>
-
-                <p
-                  v-if="staticComponent && !activeMappedSource"
-                  class="mt-3 text-[12px] text-amber-400"
-                >
-                  Komponen ini belum memiliki data indikator untuk chart dinamis, jadi panel kiri dikosongkan sementara. Chart statis tetap menggunakan data PDB.
-                </p>
-              </div>
-
-              <Chart
-                :key="rightChartKey"
-                :type="staticChartType"
-                :data="chartDataR"
-                :options="chartOptionsR"
-                :plugins="[valueLabelPlugin]"
-                class="h-120"
+              <RightPanel
+                :is-page-busy="isPageBusy"
+                :show-static-period-filter="showStaticPeriodFilter"
+                :show-static-method-filter="showStaticMethodFilter"
+                :show-static-chart-type-filter="showStaticChartTypeFilter"
+                :static-component="staticComponent"
+                :active-mapped-source="activeMappedSource"
+                :static-measure="staticMeasure"
+                :static-period="staticPeriod"
+                :static-method="staticMethod"
+                :static-chart-type="staticChartType"
+                :is-static-quarterly-disabled="isStaticQuarterlyDisabled"
+                :is-static-yearly-disabled="isStaticYearlyDisabled"
+                :filter-options="FILTER_OPTIONS"
+                :right-chart-key="rightChartKey"
+                :chart-data-r="chartDataR"
+                :chart-options-r="chartOptionsR"
+                :value-label-plugin="valueLabelPlugin"
+                @update:static-measure="staticMeasure = $event"
+                @update:static-period="staticPeriod = $event"
+                @update:static-method="staticMethod = $event"
+                @update:static-chart-type="staticChartType = $event"
               />
             </div>
           </Transition>
@@ -1674,27 +1485,6 @@ const rightChartKey = computed(() => {
 </template>
 
 <style scoped>
-.theme-text-muted {
-  color: var(--p-text-muted-color);
-}
-
-.theme-filter-panel {
-  border-color: var(--p-content-border-color);
-  background: var(--p-content-background);
-}
-
-.theme-select {
-  color: var(--p-text-color);
-  background: var(--p-content-background);
-  border: 1px solid var(--p-content-border-color);
-  outline: none;
-}
-
-.theme-select:focus {
-  border-color: var(--p-primary-500);
-  box-shadow: 0 0 0 1px var(--p-primary-500);
-}
-
 .global-top-toolbar {
   position: sticky;
   top: 0;
@@ -2098,40 +1888,6 @@ const rightChartKey = computed(() => {
   pointer-events: all;
 }
 
-.page-loading-bg-orb {
-  position: absolute;
-  border-radius: 999px;
-  filter: blur(24px);
-  opacity: 0.55;
-  animation: orbFloat 6s ease-in-out infinite;
-}
-
-.page-loading-bg-orb.orb-1 {
-  width: 180px;
-  height: 180px;
-  background: rgba(20, 184, 166, 0.16);
-  top: 18%;
-  left: 28%;
-}
-
-.page-loading-bg-orb.orb-2 {
-  width: 220px;
-  height: 220px;
-  background: rgba(59, 130, 246, 0.14);
-  right: 26%;
-  top: 24%;
-  animation-delay: 1.2s;
-}
-
-.page-loading-bg-orb.orb-3 {
-  width: 160px;
-  height: 160px;
-  background: rgba(168, 85, 247, 0.14);
-  bottom: 18%;
-  left: 46%;
-  animation-delay: 2.1s;
-}
-
 .page-loading-card {
   position: relative;
   min-width: 340px;
@@ -2297,15 +2053,6 @@ const rightChartKey = computed(() => {
   }
 }
 
-@keyframes orbFloat {
-  0%, 100% {
-    transform: translateY(0) scale(1);
-  }
-  50% {
-    transform: translateY(-14px) scale(1.06);
-  }
-}
-
 @keyframes loadingShine {
   0% {
     transform: translateX(-120%);
@@ -2380,11 +2127,6 @@ const rightChartKey = computed(() => {
     min-width: 48px;
     padding: 0 12px;
   }
-}
-
-.standalone-filter-control-wide {
-  min-width: 240px;
-  max-width: 320px;
 }
 
 .component-dropdown option.component-option-header {
