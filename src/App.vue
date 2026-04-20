@@ -2,16 +2,42 @@
 import { ref, onMounted, computed, watch, nextTick } from "vue";
 import { useChartStore } from "./stores/useChartStore";
 import CardComponent from "./components/CardComponent.vue";
-import {
-  fetchIndicatorsBySource,
-  buildDynamicDatasetFromApi,
-  buildPdbStaticDatasetFromComponent,
-} from "./services/pkrtAPI";
 
-const isGabung = ref(false);
-const isMerging = ref(false);
-const mergePhase = ref("idle");
-const freezeDuration = 160;
+import {
+  provinceOptions,
+  rangeButtons,
+  FILTER_OPTIONS,
+  LOADING_STAGES,
+  TOTAL_BAR_COLOR,
+} from "./constants/appChartConstants";
+
+import {
+  wait,
+  waitUntil,
+} from "./utils/asyncHelpers";
+
+import {
+  normalizeTextKey,
+  normalizeUnitLabel,
+  getDatasetDisplayName,
+  trimMetaByRange,
+  normalizeYearLikePeriod,
+  parsePeriod,
+  getSeriesMeta,
+  toPointData,
+  aggregationToAxisId,
+  getDatasetStackColor,
+  createDatasetTooltipMeta,
+  buildDatasetStyle,
+} from "./utils/chartHelpers";
+
+import { useLoadingOverlay } from "./composables/useLoadingOverlay";
+import { useDataLoader } from "./composables/useDataLoader";
+import { useFilterLogic } from "./composables/useFilterLogic";
+import { useChartLogic } from "./composables/useChartLogic";
+import { useMergeAnimation } from "./composables/useMergeAnimation";
+
+const chartStore = useChartStore();
 
 const staticComponent = ref("");
 const staticPeriod = ref("");
@@ -25,202 +51,294 @@ const combineBarMode = ref("standard");
 const selectedProvince = ref("indonesia");
 const selectedRange = ref("8Y");
 
-const provinceOptions = [
-  { label: "INDONESIA", value: "indonesia" },
-  { label: "ACEH", value: "aceh" },
-  { label: "SUMUT", value: "sumut" },
-  { label: "SUMBAR", value: "sumbar" },
-  { label: "RIAU", value: "riau" },
-  { label: "JAMBI", value: "jambi" },
-  { label: "SUMSEL", value: "sumsel" },
-  { label: "BENGKULU", value: "bengkulu" },
-  { label: "LAMPUNG", value: "lampung" },
-  { label: "DKI", value: "dki" },
-  { label: "JABAR", value: "jabar" },
-  { label: "JATENG", value: "jateng" },
-  { label: "DIY", value: "diy" },
-  { label: "JATIM", value: "jatim" },
-  { label: "BANTEN", value: "banten" },
-  { label: "BALI", value: "bali" },
-  { label: "NTB", value: "ntb" },
-  { label: "NTT", value: "ntt" },
-  { label: "KALBAR", value: "kalbar" },
-  { label: "KALTENG", value: "kalteng" },
-  { label: "KALSEL", value: "kalsel" },
-  { label: "KALTIM", value: "kaltim" },
-  { label: "SULUT", value: "sulut" },
-  { label: "SULTENG", value: "sulteng" },
-  { label: "SULSEL", value: "sulsel" },
-  { label: "SULTRA", value: "sultra" },
-  { label: "GORONTALO", value: "gorontalo" },
-  { label: "MALUKU", value: "maluku" },
-  { label: "PAPUA", value: "papua" },
-];
-
-const rangeButtons = [
-  { label: "1Y", value: "1Y" },
-  { label: "5Y", value: "5Y" },
-  { label: "8Y", value: "8Y" },
-];
-
-const chartStore = useChartStore();
+const componentRuleMode = ref("admin");
+// pilihan: admin | pkrt | pkp | pmtb | xm
 
 const leftPanelRef = ref(null);
 const rightPanelRef = ref(null);
 
-const snapshotPiecesVisible = ref(false);
-const snapshotPieces = ref([]);
-
-const cards = ref([]);
-const isLoadingCards = ref(false);
 const isPageBusy = ref(false);
 
-const loadingStageText = ref("Menyiapkan visual...");
-const loadingProgressText = ref("Menyelaraskan data dan tampilan");
-const loadingPulseKey = ref(0);
-const loadingPercent = ref(0);
+const {
+  loadingStageText,
+  loadingProgressText,
+  loadingPulseKey,
+  loadingPercent,
+  startLoadingStageAnimation,
+  finishLoadingStageAnimation,
+  stopLoadingStageAnimation,
+} = useLoadingOverlay({
+  stages: LOADING_STAGES,
+  wait,
+});
 
-let loadingStageTimer = null;
-let loadingPercentTimer = null;
+const {
+  activeSource,
+  activeStaticDatasetRef,
+  activeStaticDataset,
+  activeStaticIndicator,
+  activeMappedSource,
+  dynamicIndicatorUnitMap,
+  cards,
+  isLoadingCards,
+  filteredPdbIndicatorOptions,
+  globalComponentOptions,
+  loadPdbComponentOptions,
+  loadCardsFromMappedSource,
+  loadActiveStaticDataset,
+  reloadBySelectedComponent,
+  resetAllDataState,
+} = useDataLoader({
+  chartStore,
+  staticComponent,
+  staticMeasure,
+  componentRuleMode,
+});
 
-const pdbIndicatorOptions = ref([]);
-const activeSource = ref("");
-const activeStaticDatasetRef = ref(null);
-const dynamicIndicatorUnitMap = ref({});
+const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
+const primaryMeasure = computed(() => {
+  if (!primaryDataset.value) return "";
+  const id = String(primaryDataset.value.id);
+  return chartStore.compareConfigs[id]?.measure ?? "";
+});
 
-const componentRuleMode = ref("admin");
-// pilihan: admin | pkrt | pkp | pmtb | xm
+/**
+ * Bridge refs untuk memutus circular dependency antar composable
+ */
+const isGabungBridge = ref(false);
+const isCombineDisabledBridge = ref(false);
 
-const dynamicDatasetCache = new Map();
-const staticDatasetCache = new Map();
+const hasStaticNilaiQuarterlyBridge = ref(false);
+const hasStaticNilaiYearlyBridge = ref(false);
+const hasStaticGrowthQuarterlyBridge = ref(false);
+const hasStaticGrowthYearlyBridge = ref(false);
 
-const FILTER_OPTIONS = {
-  measure: [
-    { label: "Nilai", value: "nilai" },
-    { label: "Pertumbuhan", value: "pertumbuhan" },
-  ],
-  monthlyMethods: [
-    { label: "M to M", value: "mtom" },
-    { label: "Y on Y", value: "yony" },
-    { label: "Y to D", value: "ytod" },
-  ],
-  quarterlyMethods: [
-    { label: "Q to Q", value: "qtoq" },
-    { label: "Y on Y", value: "yony" },
-    { label: "C to C", value: "ctoc" },
-  ],
-  staticPeriod: [
-    { label: "Triwulanan", value: "quarterly" },
-    { label: "Tahunan", value: "yearly" },
-  ],
-  staticQuarterlyMethods: [
-    { label: "Q to Q", value: "qtoq" },
-    { label: "Y on Y", value: "yony" },
-    { label: "C to C", value: "ctoc" },
-  ],
-  chartTypes: [
-    { label: "Line Chart", value: "line" },
-    { label: "Bar Chart", value: "bar" },
-  ],
-  combineBarModes: [
-    { label: "Mode Standar", value: "standard" },
-    { label: "Mode Stack Bar", value: "stack" },
-  ],
-};
+const {
+  primaryRawConfig,
+  primaryAggregation,
+  primaryMethod,
+  allowPrimaryMonthlyByMeta,
+  allowPrimaryQuarterlyByMeta,
+  allowPrimaryYearlyByMeta,
+  canChoosePrimaryMonthly,
+  canChoosePrimaryQuarterly,
+  canChoosePrimaryYearly,
+  onPrimaryMeasureChange,
+  onPrimaryAggregationChange,
+  onPrimaryMethodChange,
+  showPrimaryAggregationFilter,
+  showPrimaryMethodFilter,
+  showStaticPeriodFilter,
+  showStaticMethodFilter,
+  getEffectiveAggregation,
+  getAxisLevelCount,
+  combineTargetAggregations,
+  combineTargetAxisLevels,
+  getAxisLevelCountFromSelections,
+  getAxisLevelCountForCardSelection,
+  isPrimaryMonthlyDisabled,
+  isPrimaryQuarterlyDisabled,
+  isPrimaryYearlyDisabled,
+  isStaticQuarterlyDisabled,
+  isStaticYearlyDisabled,
+  isCardMonthlyDisabled,
+  isCardQuarterlyDisabled,
+  isCardYearlyDisabled,
+  isCombineDisabled,
+  combineDisabledMessage,
+} = useFilterLogic({
+  chartStore,
+  isGabung: isGabungBridge,
+  primaryDataset,
+  primaryMeasure,
+  staticComponent,
+  staticPeriod,
+  staticMeasure,
+  activeStaticDataset,
+  activeMappedSource,
+  hasStaticNilaiQuarterly: hasStaticNilaiQuarterlyBridge,
+  hasStaticNilaiYearly: hasStaticNilaiYearlyBridge,
+  hasStaticGrowthQuarterly: hasStaticGrowthQuarterlyBridge,
+  hasStaticGrowthYearly: hasStaticGrowthYearlyBridge,
+});
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const {
+  isGabung,
+  isMerging,
+  mergePhase,
+  snapshotPiecesVisible,
+  snapshotPieces,
+  onToggleGabung,
+} = useMergeAnimation({
+  leftPanelRef,
+  rightPanelRef,
+  isPageBusy,
+  isCombineDisabled: isCombineDisabledBridge,
+});
 
-const LOADING_STAGES = [
-  {
-    title: "Mengambil data...",
-    subtitle: "Menghubungkan komponen dengan sumber data",
+watch(
+  isGabung,
+  (val) => {
+    isGabungBridge.value = val;
   },
-  {
-    title: "Menyusun grafik...",
-    subtitle: "Menyiapkan tampilan chart dinamis dan statis",
+  { immediate: true }
+);
+
+watch(
+  isCombineDisabled,
+  (val) => {
+    isCombineDisabledBridge.value = val;
   },
-  {
-    title: "Merapikan tampilan...",
-    subtitle: "Menyelaraskan filter, card, dan visual akhir",
+  { immediate: true }
+);
+
+const activeMonthlyMethod = computed(() => {
+  if (primaryMeasure.value !== "pertumbuhan" || primaryAggregation.value !== "monthly") return "";
+  return primaryMethod.value ?? "";
+});
+
+const shouldStackQuarterly = computed(() =>
+  !useStackPeriodMerge.value &&
+  isGabung.value &&
+  dynamicChartType.value === "bar" &&
+  staticChartType.value === "bar" &&
+  combineBarMode.value === "stack" &&
+  staticPeriod.value === "quarterly" &&
+  primaryAggregation.value === "quarterly" &&
+  primaryMeasure.value === "nilai" &&
+  staticMeasure.value === "nilai"
+);
+
+const shouldStackYearly = computed(() =>
+  !useStackPeriodMerge.value &&
+  isGabung.value &&
+  dynamicChartType.value === "bar" &&
+  staticChartType.value === "bar" &&
+  combineBarMode.value === "stack" &&
+  staticPeriod.value === "yearly" &&
+  primaryAggregation.value === "yearly" &&
+  primaryMeasure.value === "nilai" &&
+  staticMeasure.value === "nilai"
+);
+
+/**
+ * Bridge chartDataL untuk useChartLogic
+ */
+const chartDataLBridge = ref({
+  labels: [],
+  datasets: [],
+});
+
+const useStackPeriodMerge = computed(() =>
+  canUsePeriodStackMerge.value && combineBarMode.value === "stack"
+);
+
+const {
+  theme,
+  hasStaticNilaiQuarterly,
+  hasStaticNilaiYearly,
+  hasStaticGrowthQuarterly,
+  hasStaticGrowthYearly,
+  staticSeriesMeta,
+  leftPreparedDynamicSeries,
+  compatibleLeftSeries,
+  activeLeftSeries,
+  hasGrowthSeriesLeft,
+  hasValueSeriesLeft,
+  hasMixedMeasureKindsLeft,
+  leftPrimaryUnitTitle,
+  leftSecondaryUnitTitle,
+  staticAxisTitle,
+  activeDatasetOrderMap,
+  hasIncompatibleLeftSeries,
+  hasMonthlySeriesLeft,
+  hasQuarterlySeriesLeft,
+  hasYearlySeriesLeft,
+  isMixedMonthlyQuarterlyAxis,
+  leftMonthlyAxisPeriods,
+  leftQuarterlyAxisPeriods,
+  leftYearlyAxisPeriods,
+  chartOptionsL,
+  chartOptionsR,
+} = useChartLogic({
+  chartStore,
+  isGabung,
+  primaryDataset,
+  primaryMeasure,
+  primaryAggregation,
+  staticMeasure,
+  staticPeriod,
+  staticMethod,
+  activeStaticDataset,
+  selectedRange,
+  dynamicChartType,
+  staticChartType,
+  chartDataL: chartDataLBridge,
+  useStackPeriodMerge,
+  shouldStackQuarterly,
+  shouldStackYearly,
+  activeMonthlyMethod,
+  getDatasetUnitLabel,
+});
+
+
+watch(
+  [hasStaticNilaiQuarterly, hasStaticNilaiYearly, hasStaticGrowthQuarterly, hasStaticGrowthYearly],
+  ([qNilai, yNilai, qGrowth, yGrowth]) => {
+    hasStaticNilaiQuarterlyBridge.value = qNilai;
+    hasStaticNilaiYearlyBridge.value = yNilai;
+    hasStaticGrowthQuarterlyBridge.value = qGrowth;
+    hasStaticGrowthYearlyBridge.value = yGrowth;
   },
-];
+  { immediate: true }
+);
 
-const startLoadingStageAnimation = () => {
-  let index = 0;
+const isLeftUiReady = computed(() => {
+  if (!activeMappedSource.value) return true;
+  if (!cards.value.length) return false;
+  if (!primaryDataset.value) return false;
+  if (!primaryMeasure.value) return false;
+  if (!primaryAggregation.value) return false;
 
-  loadingStageText.value = LOADING_STAGES[0].title;
-  loadingProgressText.value = LOADING_STAGES[0].subtitle;
-  loadingPulseKey.value += 1;
-  loadingPercent.value = 0;
+  if (
+    primaryMeasure.value === "pertumbuhan" &&
+    primaryAggregation.value !== "yearly" &&
+    !primaryMethod.value
+  ) {
+    return false;
+  }
 
-  if (loadingStageTimer) clearInterval(loadingStageTimer);
-  if (loadingPercentTimer) clearInterval(loadingPercentTimer);
+  return true;
+});
 
-  loadingStageTimer = setInterval(() => {
-    index = (index + 1) % LOADING_STAGES.length;
-    loadingStageText.value = LOADING_STAGES[index].title;
-    loadingProgressText.value = LOADING_STAGES[index].subtitle;
-    loadingPulseKey.value += 1;
-  }, 1100);
+const isRightUiReady = computed(() => {
+  if (!staticComponent.value) return true;
+  if (!activeStaticDataset.value) return false;
+  if (!staticMeasure.value) return false;
+  if (!staticPeriod.value) return false;
 
-  loadingPercentTimer = setInterval(() => {
-    const current = loadingPercent.value;
+  if (
+    staticMeasure.value === "pertumbuhan" &&
+    staticPeriod.value === "quarterly" &&
+    !staticMethod.value
+  ) {
+    return false;
+  }
 
-    if (current < 35) {
-      loadingPercent.value += 3;
-      return;
-    }
+  return true;
+});
 
-    if (current < 65) {
-      loadingPercent.value += 2;
-      return;
-    }
+const areVisibleChartsRendered = () => {
+  const leftReady = !leftPanelRef.value || !!leftPanelRef.value.querySelector("canvas");
+  const rightReady =
+    isGabung.value || !rightPanelRef.value || !!rightPanelRef.value.querySelector("canvas");
 
-    if (current < 88) {
-      loadingPercent.value += 1;
-      return;
-    }
-
-    if (current < 93) {
-      loadingPercent.value += 0.3;
-    }
-  }, 90);
+  return leftReady && rightReady;
 };
 
-const finishLoadingStageAnimation = async () => {
-  if (loadingPercentTimer) {
-    clearInterval(loadingPercentTimer);
-    loadingPercentTimer = null;
-  }
-
-  while (loadingPercent.value < 100) {
-    loadingPercent.value = Math.min(100, loadingPercent.value + 4);
-    await wait(18);
-  }
-};
-
-const stopLoadingStageAnimation = () => {
-  if (loadingStageTimer) {
-    clearInterval(loadingStageTimer);
-    loadingStageTimer = null;
-  }
-
-  if (loadingPercentTimer) {
-    clearInterval(loadingPercentTimer);
-    loadingPercentTimer = null;
-  }
-};
-
-const waitUntil = async (checker, timeout = 15000, interval = 60) => {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeout) {
-    if (checker()) return true;
-    await wait(interval);
-  }
-
-  return false;
-};
+const isPageContentReady = computed(() => {
+  return !isLoadingCards.value && isLeftUiReady.value && isRightUiReady.value;
+});
 
 const settleUiRender = async () => {
   await nextTick();
@@ -228,54 +346,37 @@ const settleUiRender = async () => {
   await wait(150);
 };
 
-const normalizeTextKey = (text = "") =>
-  String(text ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/[()]/g, "")
-    .trim();
+const withPageBusy = async (fn) => {
+  isPageBusy.value = true;
+  startLoadingStageAnimation();
 
-const normalizeUnitLabel = (unit, fallback = "Nilai") => {
-  const text = String(unit ?? "").trim();
-  if (!text) return fallback;
+  try {
+    const result = await fn();
 
-  const lower = text.toLowerCase();
+    loadingStageText.value = "Menyelesaikan render...";
+    loadingProgressText.value = "Menunggu semua card dan chart tampil sempurna";
+    loadingPulseKey.value += 1;
 
-  if (lower === "%" || lower.includes("persen") || lower.includes("percent")) {
-    return "%";
+    await settleUiRender();
+    await waitUntil(
+      () => isPageContentReady.value && areVisibleChartsRendered(),
+      15000,
+      60
+    );
+    await settleUiRender();
+    await wait(280);
+
+    await finishLoadingStageAnimation();
+    await wait(220);
+
+    return result;
+  } finally {
+    stopLoadingStageAnimation();
+    isPageBusy.value = false;
   }
-
-  if (lower.includes("indeks") || lower.includes("index")) {
-    return "Indeks";
-  }
-
-  if (lower.includes("triliun")) {
-    return "Triliun Rupiah";
-  }
-
-  if (lower.includes("miliar")) {
-    return "Miliar Rupiah";
-  }
-
-  if (lower.includes("juta")) {
-    return "Juta Rupiah";
-  }
-
-  return text;
 };
 
-const getDatasetDisplayName = (dataset) => {
-  return (
-    dataset?.indicatorName ??
-    dataset?.deskripsi ??
-    dataset?.label ??
-    dataset?.name ??
-    ""
-  );
-};
-
-const getDatasetUnitLabel = (dataset, measure = "nilai") => {
+function getDatasetUnitLabel(dataset, measure = "nilai") {
   if (measure === "pertumbuhan") return "%";
 
   const codeCandidates = [
@@ -328,1740 +429,13 @@ const getDatasetUnitLabel = (dataset, measure = "nilai") => {
   }
 
   return normalizeUnitLabel(rawUnit, "Nilai");
-};
+}
 
-const getAxisTitleForMeasure = (measure = "nilai") => {
-  return measure === "pertumbuhan" ? "PERTUMBUHAN (%)" : "NILAI";
-};
-
-const getLegendLabelWithUnit = (dataset, measure = "nilai") => {
+function getLegendLabelWithUnit(dataset, measure = "nilai") {
   const name = getDatasetDisplayName(dataset);
   const unit = getDatasetUnitLabel(dataset, measure);
   return unit ? `${name} (${unit})` : name;
-};
-
-const getRangeLimitByAggregation = (aggregation, rangeKey) => {
-  if (rangeKey === "1Y") {
-    if (aggregation === "monthly") return 12;
-    if (aggregation === "quarterly") return 4;
-    if (aggregation === "yearly") return 1;
-  }
-
-  if (rangeKey === "5Y") {
-    if (aggregation === "monthly") return 60;
-    if (aggregation === "quarterly") return 20;
-    if (aggregation === "yearly") return 5;
-  }
-
-  if (rangeKey === "8Y") {
-    if (aggregation === "monthly") return 96;
-    if (aggregation === "quarterly") return 32;
-    if (aggregation === "yearly") return 8;
-  }
-
-  return null;
-};
-
-const trimMetaByRange = (meta, rangeKey = "8Y") => {
-  const aggregation = meta?.aggregation ?? "monthly";
-  const limit = getRangeLimitByAggregation(aggregation, rangeKey);
-
-  if (!limit) return meta;
-
-  const periods = Array.isArray(meta?.periods) ? meta.periods : [];
-  const data = Array.isArray(meta?.data) ? meta.data : [];
-
-  if (periods.length <= limit) return meta;
-
-  return {
-    ...meta,
-    periods: periods.slice(-limit),
-    data: data.slice(-limit),
-  };
-};
-
-const resolveHeaderSource = (headerText = "") => {
-  const acronym = getComponentAcronym(headerText);
-
-  if (acronym === "PKRT") return "pkrt";
-  if (acronym === "PKP") return "pkp";
-  if (acronym === "PMTB") return "pmtb";
-  if (acronym === "EKSPOR" || acronym === "IMPOR") return "eksim";
-
-  return "";
-};
-
-const shortenComponentLabel = (text = "") => {
-  return getComponentAcronym(text);
-};
-
-const formatComponentOptionLabel = (item) => {
-  const deskripsi = String(item?.deskripsi ?? "").trim();
-  const marker = extractLeadingMarker(deskripsi);
-
-  if (/^\d+\.$/.test(marker)) {
-    return shortenComponentLabel(deskripsi);
-  }
-
-  return deskripsi.replace(/^[a-z]\.\s*/i, "").trim();
-};
-
-const monthNames = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-const normalizeYearLikePeriod = (period) => {
-  const text = String(period ?? "").trim();
-  const match = text.match(/^(\d{4})/);
-  return match ? match[1] : text;
-};
-
-const parsePeriod = (period) => {
-  const text = String(period ?? "").trim().toUpperCase();
-
-  let m = text.match(/^(\d{4})M(\d{1,2})$/);
-  if (m) {
-    return {
-      raw: text,
-      type: "monthly",
-      year: Number(m[1]),
-      month: Number(m[2]),
-      quarter: Math.ceil(Number(m[2]) / 3),
-      order: Number(m[1]) * 100 + Number(m[2]),
-    };
-  }
-
-  m = text.match(/^(\d{4})Q([1-4])$/);
-  if (m) {
-    return {
-      raw: text,
-      type: "quarterly",
-      year: Number(m[1]),
-      quarter: Number(m[2]),
-      month: Number(m[2]) * 3,
-      order: Number(m[1]) * 10 + Number(m[2]),
-    };
-  }
-
-  m = text.match(/^(\d{4})$/);
-  if (m) {
-    return {
-      raw: text,
-      type: "yearly",
-      year: Number(m[1]),
-      order: Number(m[1]),
-    };
-  }
-
-  return {
-    raw: text,
-    type: "unknown",
-    year: null,
-    month: null,
-    quarter: null,
-    order: Number.MAX_SAFE_INTEGER,
-  };
-};
-
-const formatYearTick = (period) => {
-  const p = parsePeriod(period);
-  return p.year ? String(p.year) : String(period ?? "");
-};
-
-const formatQuarterMergeTickLabel = (raw) => {
-  const text = String(raw ?? "");
-  const [period, type] = text.split("__");
-  const parsed = parsePeriod(period);
-
-  if (type === "detail") return "Jan–Mar";
-  if (type === "total" && parsed.type === "quarterly") {
-    return `Q${parsed.quarter} ${parsed.year}`;
-  }
-
-  return "";
-};
-
-const formatYearMergeTickLabel = (raw, primaryAggregation = "") => {
-  const text = String(raw ?? "");
-  const [period, type] = text.split("__");
-
-  if (type === "detail") {
-    return primaryAggregation === "quarterly" ? "Q1–Q4" : "Jan–Dec";
-  }
-
-  if (type === "total") {
-    return normalizeYearLikePeriod(period);
-  }
-
-  return "";
-};
-
-const formatTooltipPeriod = (period, aggregationHint = "") => {
-  const text = String(period ?? "");
-  const parts = text.split("__");
-
-  if (parts.length >= 2) {
-    const [basePeriod, type] = parts;
-    const p = parsePeriod(basePeriod);
-
-    if (type === "detail") {
-      if (p.type === "quarterly") return `Detail Q${p.quarter} ${p.year}`;
-      if (p.type === "yearly") {
-        return primaryAggregation.value === "quarterly"
-          ? `Detail ${p.year} (Q1–Q4)`
-          : `Detail ${p.year} (Jan–Dec)`;
-      }
-      return `Detail ${basePeriod}`;
-    }
-
-    if (type === "total") {
-      if (p.type === "quarterly") return `Q${p.quarter} ${p.year}`;
-      if (p.type === "yearly") return `${p.year}`;
-      return normalizeYearLikePeriod(basePeriod);
-    }
-  }
-
-  const p = parsePeriod(period);
-
-  if (p.type === "monthly") return `${monthNames[p.month - 1]} ${p.year}`;
-  if (p.type === "quarterly") return `Q${p.quarter} ${p.year}`;
-  if (p.type === "yearly") return String(p.year);
-
-  if (aggregationHint === "monthly") return String(period ?? "");
-  if (aggregationHint === "quarterly") return String(period ?? "");
-  if (aggregationHint === "yearly") return String(period ?? "");
-
-  return String(period ?? "");
-};
-
-const getMonthLabelStep = (count) => {
-  if (count <= 12) return 1;
-  if (count <= 24) return 2;
-  if (count <= 36) return 3;
-  if (count <= 60) return 4;
-  if (count <= 96) return 6;
-  return 12;
-};
-
-const getQuarterLabelStep = (count) => {
-  if (count <= 12) return 1;
-  if (count <= 20) return 2;
-  if (count <= 32) return 3;
-  if (count <= 48) return 4;
-  return 6;
-};
-
-const buildMonthlyTickLabel = (period, index, totalCount, mode = "default") => {
-  const parsed = parsePeriod(period);
-  if (parsed.type !== "monthly") return "";
-
-  const step = getMonthLabelStep(totalCount);
-  if (index % step !== 0) return "";
-
-  const monthLabel = monthNames[parsed.month - 1] ?? "";
-
-  if (mode === "ytod") {
-    if (parsed.month === 1) return [monthLabel, String(parsed.year)];
-    return monthLabel;
-  }
-
-  if (parsed.month === 1 && totalCount > 12) {
-    return [monthLabel, String(parsed.year)];
-  }
-
-  return monthLabel;
-};
-
-const buildQuarterlyTickLabel = (period, index, totalCount, forceShowAll = false) => {
-  const parsed = parsePeriod(period);
-  if (parsed.type !== "quarterly") return "";
-
-  if (!forceShowAll) {
-    const step = getQuarterLabelStep(totalCount);
-    if (index % step !== 0) return "";
-  }
-
-  return `Q${parsed.quarter} ${parsed.year}`;
-};
-
-const dedupePeriods = (periods = []) =>
-  [...new Set(periods.filter(Boolean))].sort((a, b) => {
-    const pa = parsePeriod(a);
-    const pb = parsePeriod(b);
-    return pa.order - pb.order;
-  });
-
-const isFiniteNumber = (value) =>
-  typeof value === "number" && Number.isFinite(value);
-
-const hasValidArrayData = (arr = []) =>
-  Array.isArray(arr) && arr.some((value) => isFiniteNumber(value));
-
-const hasValidSeriesData = (seriesLike) => {
-  const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
-  return data.some((value) => isFiniteNumber(value));
-};
-
-const hasStaticNilaiQuarterly = computed(() => {
-  const ds = activeStaticDataset.value;
-  if (!ds) return false;
-
-  return (
-    Array.isArray(ds?.derivedPeriods?.quarterly) &&
-    ds.derivedPeriods.quarterly.length > 0 &&
-    Array.isArray(ds?.series?.quarterly) &&
-    ds.series.quarterly.some((value) => isFiniteNumber(value))
-  );
-});
-
-const hasStaticNilaiYearly = computed(() => {
-  const ds = activeStaticDataset.value;
-  if (!ds) return false;
-
-  return (
-    Array.isArray(ds?.derivedPeriods?.yearly) &&
-    ds.derivedPeriods.yearly.length > 0 &&
-    Array.isArray(ds?.series?.yearly) &&
-    ds.series.yearly.some((value) => isFiniteNumber(value))
-  );
-});
-
-const hasStaticGrowthQuarterly = computed(() => {
-  const ds = activeStaticDataset.value;
-  if (!ds) return false;
-
-  return (
-    hasValidSeriesData(ds?.growth?.quarterly?.qtoq) ||
-    hasValidSeriesData(ds?.growth?.quarterly?.yony) ||
-    hasValidSeriesData(ds?.growth?.quarterly?.ctoc)
-  );
-});
-
-const hasStaticGrowthYearly = computed(() => {
-  const ds = activeStaticDataset.value;
-  if (!ds) return false;
-
-  return hasValidSeriesData(ds?.growth?.yearly);
-});
-
-const datasetHasAggregationData = (dataset, aggregation, measure = "nilai") => {
-  if (!dataset) return false;
-
-  if (aggregation === "monthly" && dataset?.aggregationAvailability?.allowMonthly === false) {
-    return false;
-  }
-
-  if (aggregation === "quarterly" && dataset?.aggregationAvailability?.allowQuarterly === false) {
-    return false;
-  }
-
-  if (aggregation === "yearly" && dataset?.aggregationAvailability?.allowYearly === false) {
-    return false;
-  }
-
-  if (measure === "nilai") {
-    if (aggregation === "monthly") {
-      return hasValidArrayData(dataset?.series?.monthly);
-    }
-
-    if (aggregation === "quarterly") {
-      return hasValidArrayData(dataset?.series?.quarterly);
-    }
-
-    if (aggregation === "yearly") {
-      return hasValidArrayData(dataset?.series?.yearly);
-    }
-
-    return false;
-  }
-
-  if (aggregation === "monthly") {
-    return (
-      hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
-      hasValidSeriesData(dataset?.growth?.monthly?.yony_m) ||
-      hasValidSeriesData(dataset?.growth?.monthly?.yony) ||
-      hasValidSeriesData(dataset?.growth?.monthly?.ytod)
-    );
-  }
-
-  if (aggregation === "quarterly") {
-    return (
-      hasValidSeriesData(dataset?.growth?.quarterly?.qtoq) ||
-      hasValidSeriesData(dataset?.growth?.quarterly?.yony) ||
-      hasValidSeriesData(dataset?.growth?.quarterly?.ctoc)
-    );
-  }
-
-  if (aggregation === "yearly") {
-    return hasValidSeriesData(dataset?.growth?.yearly);
-  }
-
-  return false;
-};
-
-const getSeriesMeta = (dataset, aggregation) => {
-  if (aggregation === "monthly") {
-    return {
-      data: Array.isArray(dataset?.series?.monthly) ? dataset.series.monthly : [],
-      periods: Array.isArray(dataset?.derivedPeriods?.monthly) ? dataset.derivedPeriods.monthly : [],
-      aggregation: "monthly",
-    };
-  }
-
-  if (aggregation === "quarterly") {
-    return {
-      data: Array.isArray(dataset?.series?.quarterly) ? dataset.series.quarterly : [],
-      periods: Array.isArray(dataset?.derivedPeriods?.quarterly) ? dataset.derivedPeriods.quarterly : [],
-      aggregation: "quarterly",
-    };
-  }
-
-  if (aggregation === "yearly") {
-    return {
-      data: Array.isArray(dataset?.series?.yearly) ? dataset.series.yearly : [],
-      periods: Array.isArray(dataset?.derivedPeriods?.yearly) ? dataset.derivedPeriods.yearly : [],
-      aggregation: "yearly",
-    };
-  }
-
-  return {
-    data: [],
-    periods: [],
-    aggregation,
-  };
-};
-
-const getBackendGrowthMeta = (dataset, aggregation, method, fallbackPeriods = []) => {
-  if (aggregation === "yearly") {
-    const payload = dataset?.growth?.yearly;
-
-    if (Array.isArray(payload)) {
-      return {
-        data: payload,
-        periods: fallbackPeriods,
-        aggregation: "yearly",
-      };
-    }
-
-    if (payload && typeof payload === "object") {
-      return {
-        data: Array.isArray(payload.data) ? payload.data : [],
-        periods: Array.isArray(payload.periods) ? payload.periods : fallbackPeriods,
-        aggregation: "yearly",
-      };
-    }
-
-    return {
-      data: [],
-      periods: fallbackPeriods,
-      aggregation: "yearly",
-    };
-  }
-
-  let payload = null;
-
-  if (aggregation === "monthly") {
-    if (method === "yony") {
-      payload = dataset?.growth?.monthly?.yony_m ?? dataset?.growth?.monthly?.yony;
-    } else {
-      payload = dataset?.growth?.monthly?.[method];
-    }
-  } else {
-    payload = dataset?.growth?.[aggregation]?.[method];
-  }
-
-  if (Array.isArray(payload)) {
-    return {
-      data: payload,
-      periods: fallbackPeriods,
-      aggregation,
-    };
-  }
-
-  if (payload && typeof payload === "object") {
-    return {
-      data: Array.isArray(payload.data) ? payload.data : [],
-      periods: Array.isArray(payload.periods) ? payload.periods : fallbackPeriods,
-      aggregation,
-    };
-  }
-
-  return {
-    data: [],
-    periods: fallbackPeriods,
-    aggregation,
-  };
-};
-
-const getPreparedSeriesMeta = (dataset, config) => {
-  const measure = config?.measure ?? "nilai";
-  const aggregation =
-    config?.aggregation ??
-    (dataset.rawFrequency === "monthly"
-      ? "monthly"
-      : dataset.rawFrequency === "quarterly"
-        ? "quarterly"
-        : "yearly");
-
-  const method =
-    config?.method ??
-    (aggregation === "monthly"
-      ? "mtom"
-      : aggregation === "quarterly"
-        ? "qtoq"
-        : "annual");
-
-  const baseMeta = getSeriesMeta(dataset, aggregation);
-
-  if (measure === "nilai") return baseMeta;
-
-  return getBackendGrowthMeta(dataset, aggregation, method, baseMeta.periods);
-};
-
-const toPointData = (meta) =>
-  meta.periods.map((period, index) => ({
-    x: period,
-    y: meta.data[index] ?? null,
-  }));
-
-const aggregationToAxisId = (aggregation) => {
-  if (aggregation === "monthly") return "xMonthly";
-  if (aggregation === "quarterly") return "xQuarterly";
-  if (aggregation === "yearly") return "xYearly";
-  return "xMonthly";
-};
-
-const mapWithConcurrency = async (items, mapper, limit = 4) => {
-  const results = new Array(items.length);
-  let currentIndex = 0;
-
-  const worker = async () => {
-    while (currentIndex < items.length) {
-      const index = currentIndex++;
-      results[index] = await mapper(items[index], index);
-    }
-  };
-
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    () => worker()
-  );
-
-  await Promise.all(workers);
-  return results;
-};
-
-const extractLeadingMarker = (text = "") => {
-  const clean = String(text ?? "").trim();
-  return clean.match(/^\s*(\d+\.|[a-zA-Z]\.)\s*/)?.[1] ?? "";
-};
-
-const stripLeadingMarker = (text = "") => {
-  return String(text ?? "")
-    .replace(/^\s*(\d+\.|[a-zA-Z]\.)\s*/i, "")
-    .trim();
-};
-
-const getComponentAcronym = (text = "") => {
-  const clean = stripLeadingMarker(text).toUpperCase();
-
-  if (clean.startsWith("PENGELUARAN KONSUMSI RUMAHTANGGA")) return "PKRT";
-  if (clean.startsWith("PENGELUARAN KONSUMSI LNPRT")) return "LNPRT";
-  if (clean.startsWith("PENGELUARAN KONSUMSI PEMERINTAH")) return "PKP";
-  if (clean.startsWith("PEMBENTUKAN MODAL TETAP BRUTO")) return "PMTB";
-  if (clean.startsWith("PERUBAHAN INVENTORI")) return "PI";
-  if (clean.startsWith("EKSPOR BARANG DAN JASA")) return "EKSPOR";
-  if (clean.startsWith("IMPOR BARANG DAN JASA")) return "IMPOR";
-
-  return stripLeadingMarker(text);
-};
-
-const buildPdbComponentMappings = (items = []) => {
-  let currentHeaderText = "";
-  let currentHeaderShort = "";
-  let currentHeaderSource = "";
-
-  return items.map((item) => {
-    const rawDeskripsi = String(item?.deskripsi ?? "").trim();
-    const marker = extractLeadingMarker(rawDeskripsi);
-    const isHeader = /^\d+\.$/.test(marker);
-    const isSub = /^[a-zA-Z]\.$/.test(marker);
-
-    if (isHeader) {
-      currentHeaderText = stripLeadingMarker(rawDeskripsi);
-      currentHeaderShort = getComponentAcronym(rawDeskripsi);
-      currentHeaderSource = resolveHeaderSource(rawDeskripsi);
-
-      return {
-        ...item,
-        marker,
-        isHeader: true,
-        isSub: false,
-        deskripsi: currentHeaderText,
-        shortLabel: currentHeaderShort,
-        fullLabel: currentHeaderText,
-        parentHeaderText: currentHeaderText,
-        parentHeaderShort: currentHeaderShort,
-        mappedSource: currentHeaderSource,
-      };
-    }
-
-    if (isSub) {
-      const cleanSub = stripLeadingMarker(rawDeskripsi);
-
-      return {
-        ...item,
-        marker,
-        isHeader: false,
-        isSub: true,
-        deskripsi: cleanSub,
-        shortLabel: cleanSub,
-        fullLabel: cleanSub,
-        parentHeaderText: currentHeaderText,
-        parentHeaderShort: currentHeaderShort,
-        mappedSource: currentHeaderSource,
-      };
-    }
-
-    const cleanText = stripLeadingMarker(rawDeskripsi);
-
-    return {
-      ...item,
-      marker,
-      isHeader: false,
-      isSub: false,
-      deskripsi: cleanText,
-      shortLabel: cleanText,
-      fullLabel: cleanText,
-      parentHeaderText: currentHeaderText,
-      parentHeaderShort: currentHeaderShort,
-      mappedSource: currentHeaderSource,
-    };
-  });
-};
-
-
-const isAllowedByComponentRule = (item, ruleMode) => {
-  const mode = String(ruleMode ?? "admin").toLowerCase();
-
-  if (mode === "admin") return true;
-
-  const source = String(item?.mappedSource ?? "").toLowerCase();
-
-  if (mode === "xm") {
-    return source === "eksim";
-  }
-
-  return source === mode;
-};
-
-const getDynamicCacheKey = ({ source, kode }) =>
-  `${String(source).toLowerCase()}-${String(kode)}`;
-
-const getCachedDynamicDataset = async (item) => {
-  const key = getDynamicCacheKey({
-    source: item.source,
-    kode: item.kode,
-  });
-
-  if (dynamicDatasetCache.has(key)) return dynamicDatasetCache.get(key);
-
-  const dataset = await buildDynamicDatasetFromApi({
-    source: item.source,
-    kode: item.kode,
-    deskripsi: item.deskripsi,
-    satuan: item.satuan,
-  });
-
-  const mergedDataset = dataset
-    ? {
-        ...dataset,
-        kode: dataset?.kode ?? item?.kode ?? "",
-        apiCode: dataset?.apiCode ?? item?.kode ?? "",
-        sourceCode: dataset?.sourceCode ?? item?.kode ?? "",
-        satuan: dataset?.satuan ?? item?.satuan ?? "",
-        deskripsi: dataset?.deskripsi ?? item?.deskripsi ?? "",
-        indicatorName:
-          dataset?.indicatorName ??
-          item?.deskripsi ??
-          dataset?.deskripsi ??
-          "",
-        meta: {
-          ...(dataset?.meta ?? {}),
-          kode: dataset?.meta?.kode ?? item?.kode ?? "",
-          satuan: dataset?.meta?.satuan ?? item?.satuan ?? "",
-          deskripsi: dataset?.meta?.deskripsi ?? item?.deskripsi ?? "",
-        },
-      }
-    : null;
-
-  if (mergedDataset) {
-    dynamicDatasetCache.set(key, mergedDataset);
-  }
-
-  return mergedDataset;
-};
-
-const getCachedStaticDataset = async ({ kode, deskripsi, measure }) => {
-  const key = `pdb-static-${String(kode)}-${String(measure)}`;
-
-  if (staticDatasetCache.has(key)) return staticDatasetCache.get(key);
-
-  const dataset = await buildPdbStaticDatasetFromComponent({
-    kode,
-    deskripsi,
-    measure,
-  });
-
-  if (dataset) {
-    staticDatasetCache.set(key, dataset);
-  }
-
-  return dataset;
-};
-
-const filteredPdbIndicatorOptions = computed(() =>
-  pdbIndicatorOptions.value.filter((item) =>
-    isAllowedByComponentRule(item, componentRuleMode.value)
-  )
-);
-
-const globalComponentOptions = computed(() =>
-  filteredPdbIndicatorOptions.value.map((item) => ({
-    label: item?.shortLabel || item?.deskripsi || "",
-    fullLabel: item?.isHeader
-      ? (item?.fullLabel || item?.deskripsi || "")
-      : "",
-    value: String(item.kode),
-    isHeader: !!item?.isHeader,
-  }))
-);
-
-const staticComponentOptions = computed(() =>
-  filteredPdbIndicatorOptions.value.map((item) => ({
-    label: formatComponentOptionLabel(item),
-    value: String(item.kode),
-  }))
-);
-
-const activeStaticIndicator = computed(() =>
-  filteredPdbIndicatorOptions.value.find(
-    (item) => String(item.kode) === String(staticComponent.value)
-  ) ?? null
-);
-
-const activeStaticDataset = computed(() => activeStaticDatasetRef.value ?? null);
-
-const activeMappedSource = computed(() =>
-  String(activeStaticIndicator.value?.mappedSource ?? "")
-);
-
-const primaryDataset = computed(() => chartStore.selectedDataset?.[0] ?? null);
-
-const primaryRawConfig = computed(() => {
-  if (!primaryDataset.value) return null;
-  const id = String(primaryDataset.value.id);
-  return chartStore.compareConfigs[id] ?? null;
-});
-
-const primaryMeasure = computed(() => primaryRawConfig.value?.measure ?? "");
-const primaryAggregation = computed(() => primaryRawConfig.value?.aggregation ?? "");
-const primaryMethod = computed(() => primaryRawConfig.value?.method ?? "");
-const allowPrimaryMonthlyByMeta = computed(() => {
-  const value = primaryDataset.value?.aggregationAvailability?.allowMonthly;
-  return typeof value === "boolean" ? value : true;
-});
-
-const allowPrimaryQuarterlyByMeta = computed(() => {
-  const value = primaryDataset.value?.aggregationAvailability?.allowQuarterly;
-  return typeof value === "boolean" ? value : true;
-});
-
-const allowPrimaryYearlyByMeta = computed(() => {
-  const value = primaryDataset.value?.aggregationAvailability?.allowYearly;
-  return typeof value === "boolean" ? value : true;
-});
-const isLeftUiReady = computed(() => {
-  if (!activeMappedSource.value) return true;
-  if (!cards.value.length) return false;
-  if (!primaryDataset.value) return false;
-  if (!primaryMeasure.value) return false;
-  if (!primaryAggregation.value) return false;
-
-  if (
-    primaryMeasure.value === "pertumbuhan" &&
-    primaryAggregation.value !== "yearly" &&
-    !primaryMethod.value
-  ) {
-    return false;
-  }
-
-  return true;
-});
-
-const isRightUiReady = computed(() => {
-  if (!staticComponent.value) return true;
-  if (!activeStaticDataset.value) return false;
-  if (!staticMeasure.value) return false;
-  if (!staticPeriod.value) return false;
-
-  if (
-    staticMeasure.value === "pertumbuhan" &&
-    staticPeriod.value === "quarterly" &&
-    !staticMethod.value
-  ) {
-    return false;
-  }
-
-  return true;
-});
-
-const areVisibleChartsRendered = () => {
-  const leftReady = !leftPanelRef.value || !!leftPanelRef.value.querySelector("canvas");
-  const rightReady =
-    isGabung.value || !rightPanelRef.value || !!rightPanelRef.value.querySelector("canvas");
-
-  return leftReady && rightReady;
-};
-
-const isPageContentReady = computed(() => {
-  return !isLoadingCards.value && isLeftUiReady.value && isRightUiReady.value;
-});
-
-const withPageBusy = async (fn) => {
-  isPageBusy.value = true;
-  startLoadingStageAnimation();
-
-  try {
-    const result = await fn();
-
-    loadingStageText.value = "Menyelesaikan render...";
-    loadingProgressText.value = "Menunggu semua card dan chart tampil sempurna";
-    loadingPulseKey.value += 1;
-
-    await settleUiRender();
-    await waitUntil(
-      () => isPageContentReady.value && areVisibleChartsRendered(),
-      15000,
-      60
-    );
-    await settleUiRender();
-    await wait(280);
-
-    await finishLoadingStageAnimation();
-    await wait(220);
-
-    return result;
-  } finally {
-    stopLoadingStageAnimation();
-    isPageBusy.value = false;
-  }
-};
-
-const loadPdbComponentOptions = async () => {
-  try {
-    const indikatorPdb = await fetchIndicatorsBySource("pdb");
-    const mapped = buildPdbComponentMappings(indikatorPdb);
-    pdbIndicatorOptions.value = mapped;
-
-    const filtered = mapped.filter((item) =>
-      isAllowedByComponentRule(item, componentRuleMode.value)
-    );
-
-    if (!staticComponent.value && filtered.length) {
-      staticComponent.value = String(filtered[0].kode);
-    } else if (!filtered.length) {
-      staticComponent.value = "";
-    }
-  } catch (err) {
-    console.error("Gagal load indikator PDB", err);
-    pdbIndicatorOptions.value = [];
-    staticComponent.value = "";
-  }
-};
-
-const loadCardsFromMappedSource = async () => {
-  try {
-    isLoadingCards.value = true;
-
-    const source = activeMappedSource.value;
-
-    if (!source) {
-      cards.value = [];
-      activeSource.value = "";
-      chartStore.selectedDataset = [];
-      await nextTick();
-      return;
-    }
-
-    activeSource.value = source;
-
-    const indikator = await fetchIndicatorsBySource(source);
-
-    dynamicIndicatorUnitMap.value = indikator.reduce((acc, item) => {
-      const unit = String(item?.satuan ?? item?.unit ?? "").trim();
-      const kode = String(item?.kode ?? item?.code ?? item?.apiCode ?? "").trim();
-      const nama = normalizeTextKey(item?.deskripsi ?? "");
-
-      if (kode) acc[kode] = unit;
-      if (nama) acc[`name:${nama}`] = unit;
-
-      return acc;
-    }, {});
-
-    const datasets = await mapWithConcurrency(
-      indikator.map((item) => ({
-        ...item,
-        source,
-      })),
-      async (item) => await getCachedDynamicDataset(item),
-      3
-    );
-
-    const validDatasets = datasets.filter((item) => item && item.id);
-    cards.value = validDatasets;
-
-    if (validDatasets.length) {
-      const first = validDatasets[0];
-
-      chartStore.initPrimary(first);
-      chartStore.setMeasure(first.id, "nilai");
-
-      if (first?.aggregationAvailability?.allowMonthly) {
-        chartStore.setAggregation(first.id, "monthly");
-      } else if (first?.aggregationAvailability?.allowQuarterly) {
-        chartStore.setAggregation(first.id, "quarterly");
-      } else if (first?.aggregationAvailability?.allowYearly) {
-        chartStore.setAggregation(first.id, "yearly");
-      } else if (
-        String(first?.apiFreqPrefix ?? first?.apiCode ?? "")
-          .charAt(0)
-          .toUpperCase() !== "Q" &&
-        first.rawFrequency === "monthly"
-      ) {
-        chartStore.setAggregation(first.id, "monthly");
-      } else if (
-        first.rawFrequency === "monthly" ||
-        first.rawFrequency === "quarterly"
-      ) {
-        chartStore.setAggregation(first.id, "quarterly");
-      } else {
-        chartStore.setAggregation(first.id, "yearly");
-      }
-
-    } else {
-      cards.value = [];
-      chartStore.selectedDataset = [];
-    }
-
-    await nextTick();
-    await nextTick();
-  } catch (err) {
-    console.error("Gagal load data source terpilih", err);
-    cards.value = [];
-    activeSource.value = "";
-    chartStore.selectedDataset = [];
-  } finally {
-    await nextTick();
-    isLoadingCards.value = false;
-  }
-};
-
-const loadActiveStaticDataset = async () => {
-  try {
-    if (!staticComponent.value || !activeStaticIndicator.value) {
-      activeStaticDatasetRef.value = null;
-      return;
-    }
-
-    const dataset = await getCachedStaticDataset({
-      kode: activeStaticIndicator.value.kode,
-      deskripsi: activeStaticIndicator.value.deskripsi,
-      measure: staticMeasure.value,
-    });
-
-    activeStaticDatasetRef.value = dataset ?? null;
-  } catch (err) {
-    console.error("Gagal load dataset statis aktif", err);
-    activeStaticDatasetRef.value = null;
-  }
-};
-
-const reloadBySelectedComponent = async () => {
-  chartStore.clearAllCompareConfigs();
-  staticMeasure.value = "nilai";
-
-  await loadCardsFromMappedSource();
-  await loadActiveStaticDataset();
-
-  if (activeStaticDatasetRef.value) {
-    if ((activeStaticDatasetRef.value?.derivedPeriods?.quarterly?.length ?? 0) > 0) {
-      staticPeriod.value = "quarterly";
-      staticMethod.value = "qtoq";
-    } else {
-      staticPeriod.value = "yearly";
-      staticMethod.value = "annual";
-    }
-  } else {
-    staticPeriod.value = "quarterly";
-    staticMethod.value = "qtoq";
-  }
-
-  await nextTick();
-  await nextTick();
-};
-
-onMounted(async () => {
-  await withPageBusy(async () => {
-    await loadPdbComponentOptions();
-    await reloadBySelectedComponent();
-  });
-});
-
-watch(staticComponent, async (val, oldVal) => {
-  if (!val) {
-    staticPeriod.value = "";
-    staticMethod.value = "";
-    activeStaticDatasetRef.value = null;
-    cards.value = [];
-    activeSource.value = "";
-    return;
-  }
-
-  if (val === oldVal) return;
-
-  if (!staticPeriod.value) {
-    staticPeriod.value = "quarterly";
-  }
-
-  await withPageBusy(async () => {
-    await reloadBySelectedComponent();
-  });
-});
-
-watch(staticMeasure, async () => {
-  await withPageBusy(async () => {
-    if (staticPeriod.value === "quarterly") {
-      staticMethod.value = "qtoq";
-    } else if (staticPeriod.value === "yearly") {
-      staticMethod.value = "annual";
-    }
-
-    await loadActiveStaticDataset();
-  });
-});
-
-watch(staticPeriod, (val) => {
-  if (!val) {
-    staticMethod.value = "";
-    return;
-  }
-
-  if (val === "quarterly") {
-    staticMethod.value = "qtoq";
-    return;
-  }
-
-  if (val === "yearly") {
-    staticMethod.value = "annual";
-  }
-});
-
-watch(componentRuleMode, async () => {
-  const filtered = filteredPdbIndicatorOptions.value;
-
-  if (!filtered.length) {
-    staticComponent.value = "";
-    activeStaticDatasetRef.value = null;
-    cards.value = [];
-    activeSource.value = "";
-    chartStore.selectedDataset = [];
-    return;
-  }
-
-  const stillExists = filtered.some(
-    (item) => String(item.kode) === String(staticComponent.value)
-  );
-
-  if (!stillExists) {
-    staticComponent.value = String(filtered[0].kode);
-  }
-});
-
-const showStaticPeriodFilter = computed(() => !!staticComponent.value);
-const showStaticMethodFilter = computed(
-  () =>
-    !!staticComponent.value &&
-    staticMeasure.value === "pertumbuhan" &&
-    staticPeriod.value === "quarterly"
-);
-
-const theme = computed(() => {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    primary: style.getPropertyValue("--p-primary-500").trim(),
-    text: style.getPropertyValue("--p-text-color").trim(),
-    textSecondary: style.getPropertyValue("--p-text-muted-color").trim(),
-    border: style.getPropertyValue("--p-content-border-color").trim(),
-    panelBg: style.getPropertyValue("--p-content-background").trim(),
-  };
-});
-
-const palette = [
-  { line: "#3B82F6", fill: "rgba(59,130,246,0.45)" },
-  { line: "#F59E0B", fill: "rgba(245,158,11,0.45)" },
-  { line: "#A855F7", fill: "rgba(168,85,247,0.45)" },
-  { line: "#22C55E", fill: "rgba(34,197,94,0.45)" },
-  { line: "#EF4444", fill: "rgba(239,68,68,0.45)" },
-];
-
-const DATASET_COLOR_FAMILIES = [
-  ["#DC2626", "#EF4444", "#F87171", "#FCA5A5", "#FECACA"],
-  ["#CA8A04", "#EAB308", "#FACC15", "#FDE047", "#FEF9C3"],
-  ["#16A34A", "#22C55E", "#4ADE80", "#86EFAC", "#BBF7D0"],
-  ["#1E3A8A", "#2563EB", "#3B82F6", "#93C5FD", "#DBEAFE"],
-  ["#6B21A8", "#7C3AED", "#8B5CF6", "#C4B5FD", "#EDE9FE"],
-];
-
-const hexToRgb = (hex) => {
-  const clean = hex.replace("#", "");
-  const full = clean.length === 3
-    ? clean.split("").map((c) => c + c).join("")
-    : clean;
-
-  const num = parseInt(full, 16);
-  return {
-    r: (num >> 16) & 255,
-    g: (num >> 8) & 255,
-    b: num & 255,
-  };
-};
-
-const toRgba = (hex, alpha = 1) => {
-  const { r, g, b } = hexToRgb(hex);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-};
-
-const getDatasetFamilyIndex = (datasetId, datasetOrderMap = {}) => {
-  const id = String(datasetId ?? "");
-  const mappedIndex = datasetOrderMap[id];
-
-  if (mappedIndex !== undefined && mappedIndex !== null) {
-    return mappedIndex % DATASET_COLOR_FAMILIES.length;
-  }
-
-  return 0;
-};
-
-const getDatasetStackColor = ({
-  datasetId,
-  slot = 1,
-  mode = "month",
-  datasetOrderMap = {},
-}) => {
-  const family = DATASET_COLOR_FAMILIES[
-    getDatasetFamilyIndex(datasetId, datasetOrderMap)
-  ];
-
-  if (mode === "quarter") {
-    const quarterIndexes = [0, 1, 2, 3];
-    const idx = quarterIndexes[(slot - 1) % quarterIndexes.length];
-    const hex = family[idx];
-    return {
-      line: hex,
-      fill: toRgba(hex, 0.88),
-    };
-  }
-
-  const monthIndexes = [0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 1, 2];
-  const idx = monthIndexes[(slot - 1) % monthIndexes.length];
-  const hex = family[idx];
-  return {
-    line: hex,
-    fill: toRgba(hex, 0.9),
-  };
-};
-
-const TOTAL_BAR_COLOR = {
-  line: "#14B8A6",
-  fill: "rgba(20, 184, 166, 0.35)",
-};
-
-const staticSeriesMeta = computed(() => {
-  if (!activeStaticDataset.value || !staticPeriod.value) {
-    return { data: [], periods: [], aggregation: "quarterly" };
-  }
-
-  const aggregation = staticPeriod.value === "yearly" ? "yearly" : "quarterly";
-  let meta;
-
-  if (staticMeasure.value === "nilai") {
-    meta = getSeriesMeta(activeStaticDataset.value, aggregation);
-  } else {
-    const baseMeta = getSeriesMeta(activeStaticDataset.value, aggregation);
-
-    if (aggregation === "yearly") {
-      meta = getBackendGrowthMeta(
-        activeStaticDataset.value,
-        "yearly",
-        "annual",
-        baseMeta.periods
-      );
-    } else {
-      meta = getBackendGrowthMeta(
-        activeStaticDataset.value,
-        "quarterly",
-        staticMethod.value || "qtoq",
-        baseMeta.periods
-      );
-    }
-  }
-
-  return trimMetaByRange(meta, selectedRange.value);
-});
-
-const showPrimaryAggregationFilter = computed(() =>
-  !!primaryDataset.value && !!primaryMeasure.value
-);
-
-const showPrimaryMethodFilter = computed(
-  () =>
-    !!primaryDataset.value &&
-    primaryMeasure.value === "pertumbuhan" &&
-    !!primaryAggregation.value &&
-    primaryAggregation.value !== "yearly"
-);
-
-const canChoosePrimaryMonthly = computed(() =>
-  datasetHasAggregationData(
-    primaryDataset.value,
-    "monthly",
-    primaryMeasure.value || "nilai"
-  )
-);
-
-const canChoosePrimaryQuarterly = computed(() =>
-  datasetHasAggregationData(
-    primaryDataset.value,
-    "quarterly",
-    primaryMeasure.value || "nilai"
-  )
-);
-
-const canChoosePrimaryYearly = computed(() =>
-  datasetHasAggregationData(
-    primaryDataset.value,
-    "yearly",
-    primaryMeasure.value || "nilai"
-  )
-);
-
-const onPrimaryMeasureChange = (e) => {
-  if (!primaryDataset.value) return;
-  chartStore.setMeasure(primaryDataset.value.id, e.target.value);
-};
-
-const onPrimaryAggregationChange = (e) => {
-  if (!primaryDataset.value) return;
-  chartStore.setAggregation(primaryDataset.value.id, e.target.value);
-};
-
-const onPrimaryMethodChange = (e) => {
-  if (!primaryDataset.value) return;
-  chartStore.setMethod(primaryDataset.value.id, e.target.value);
-};
-
-const getEffectiveAggregation = (dataset) => {
-  const id = String(dataset.id);
-  const rawConfig = chartStore.compareConfigs[id] ?? null;
-
-  if (rawConfig?.aggregation) return rawConfig.aggregation;
-
-  if (dataset?.aggregationAvailability?.allowMonthly) return "monthly";
-  if (dataset?.aggregationAvailability?.allowQuarterly) return "quarterly";
-  if (dataset?.aggregationAvailability?.allowYearly) return "yearly";
-
-  return dataset.rawFrequency === "monthly"
-    ? "monthly"
-    : dataset.rawFrequency === "quarterly"
-      ? "quarterly"
-      : "yearly";
-};
-
-const getAxisLevelCount = (aggregations) => {
-  const uniq = [...new Set(aggregations)];
-  const hasMonthly = uniq.includes("monthly");
-  const hasQuarterly = uniq.includes("quarterly");
-  const hasYearly = uniq.includes("yearly");
-
-  if (hasMonthly && hasQuarterly && hasYearly) return 3;
-  if (
-    (hasMonthly && hasQuarterly) ||
-    (hasMonthly && hasYearly) ||
-    (hasQuarterly && hasYearly)
-  ) {
-    return 2;
-  }
-  return 1;
-};
-
-const combineTargetAggregations = computed(() => {
-  const result = chartStore.selectedDataset.map((ds) => getEffectiveAggregation(ds));
-  if (staticComponent.value && staticPeriod.value) {
-    result.push(staticPeriod.value === "yearly" ? "yearly" : "quarterly");
-  }
-  return result;
-});
-
-const combineTargetAxisLevels = computed(() =>
-  getAxisLevelCount(combineTargetAggregations.value)
-);
-
-const getAxisLevelCountFromSelections = ({
-  primaryAggregationCandidate = primaryAggregation.value,
-  staticPeriodCandidate = staticPeriod.value,
-} = {}) => {
-  const result = [];
-
-  chartStore.selectedDataset.forEach((ds, index) => {
-    if (index === 0) {
-      if (primaryAggregationCandidate) {
-        result.push(primaryAggregationCandidate);
-      }
-    } else {
-      result.push(getEffectiveAggregation(ds));
-    }
-  });
-
-  if (staticComponent.value && staticPeriodCandidate) {
-    result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
-  }
-
-  return getAxisLevelCount(result);
-};
-
-const getAxisLevelCountForCardSelection = ({
-  cardId,
-  aggregationCandidate,
-  staticPeriodCandidate = staticPeriod.value,
-} = {}) => {
-  const result = [];
-
-  chartStore.selectedDataset.forEach((ds) => {
-    const id = String(ds.id);
-    if (id === String(cardId)) {
-      if (aggregationCandidate) {
-        result.push(aggregationCandidate);
-      } else {
-        result.push(getEffectiveAggregation(ds));
-      }
-    } else {
-      result.push(getEffectiveAggregation(ds));
-    }
-  });
-
-  if (staticComponent.value && staticPeriodCandidate && activeMappedSource.value) {
-    result.push(staticPeriodCandidate === "yearly" ? "yearly" : "quarterly");
-  }
-
-  return getAxisLevelCount(result);
-};
-
-const isPrimaryMonthlyDisabled = computed(() => {
-  if (!primaryDataset.value) return true;
-  if (!allowPrimaryMonthlyByMeta.value) return true;
-  if (!canChoosePrimaryMonthly.value) return true;
-  if (!isGabung.value) return false;
-  if (!primaryMeasure.value) return false;
-
-  return getAxisLevelCountFromSelections({
-    primaryAggregationCandidate: "monthly",
-    staticPeriodCandidate: staticPeriod.value,
-  }) > 2;
-});
-
-const isPrimaryQuarterlyDisabled = computed(() => {
-  if (!primaryDataset.value) return true;
-  if (!allowPrimaryQuarterlyByMeta.value) return true;
-  if (!canChoosePrimaryQuarterly.value) return true;
-  if (!isGabung.value) return false;
-  if (!primaryMeasure.value) return false;
-
-  return getAxisLevelCountFromSelections({
-    primaryAggregationCandidate: "quarterly",
-    staticPeriodCandidate: staticPeriod.value,
-  }) > 2;
-});
-
-const isPrimaryYearlyDisabled = computed(() => {
-  if (!primaryDataset.value) return true;
-  if (!allowPrimaryYearlyByMeta.value) return true;
-  if (!canChoosePrimaryYearly.value) return true;
-  if (!isGabung.value) return false;
-  if (!primaryMeasure.value) return false;
-
-  return getAxisLevelCountFromSelections({
-    primaryAggregationCandidate: "yearly",
-    staticPeriodCandidate: staticPeriod.value,
-  }) > 2;
-});
-
-const isStaticQuarterlyDisabled = computed(() => {
-  if (!staticComponent.value) return true;
-  if (!activeStaticDataset.value) return true;
-
-  const hasData =
-    staticMeasure.value === "nilai"
-      ? hasStaticNilaiQuarterly.value
-      : hasStaticGrowthQuarterly.value;
-
-  if (!hasData) return true;
-
-  if (!isGabung.value) return false;
-
-  return getAxisLevelCountFromSelections({
-    primaryAggregationCandidate: primaryAggregation.value,
-    staticPeriodCandidate: "quarterly",
-  }) > 2;
-});
-
-const isStaticYearlyDisabled = computed(() => {
-  if (!staticComponent.value) return true;
-  if (!activeStaticDataset.value) return true;
-
-  const hasData =
-    staticMeasure.value === "nilai"
-      ? hasStaticNilaiYearly.value
-      : hasStaticGrowthYearly.value;
-
-  if (!hasData) return true;
-
-  if (!isGabung.value) return false;
-
-  return getAxisLevelCountFromSelections({
-    primaryAggregationCandidate: primaryAggregation.value,
-    staticPeriodCandidate: "yearly",
-  }) > 2;
-});
-
-const isCardMonthlyDisabled = (card) => {
-  if (!card) return true;
-
-  const cardConfig = chartStore.getCompareConfig(card) ?? {};
-  const measure = cardConfig.measure ?? "nilai";
-
-  if (!datasetHasAggregationData(card, "monthly", measure)) return true;
-  if (!isGabung.value) return false;
-
-  return getAxisLevelCountForCardSelection({
-    cardId: card.id,
-    aggregationCandidate: "monthly",
-  }) > 2;
-};
-
-const isCardQuarterlyDisabled = (card) => {
-  if (!card) return true;
-
-  const cardConfig = chartStore.getCompareConfig(card) ?? {};
-  const measure = cardConfig.measure ?? "nilai";
-
-  if (!datasetHasAggregationData(card, "quarterly", measure)) return true;
-  if (!isGabung.value) return false;
-
-  return getAxisLevelCountForCardSelection({
-    cardId: card.id,
-    aggregationCandidate: "quarterly",
-  }) > 2;
-};
-
-const isCardYearlyDisabled = (card) => {
-  if (!card) return true;
-
-  const cardConfig = chartStore.getCompareConfig(card) ?? {};
-  const measure = cardConfig.measure ?? "nilai";
-
-  return !datasetHasAggregationData(card, "yearly", measure);
-};
-
-const isCombineDisabled = computed(() => combineTargetAxisLevels.value > 2);
-
-const combineDisabledMessage = computed(() => {
-  if (!isCombineDisabled.value) return "";
-  return "Fitur gabungkan dinonaktifkan karena kombinasi filter ini membutuhkan 3 sumbu X sekaligus, sedangkan maksimum hanya 2.";
-});
-
-watch(
-  [
-    isGabung,
-    primaryMeasure,
-    primaryAggregation,
-    staticComponent,
-    staticPeriod,
-    canChoosePrimaryMonthly,
-    canChoosePrimaryQuarterly,
-    canChoosePrimaryYearly,
-    isPrimaryMonthlyDisabled,
-    isPrimaryQuarterlyDisabled,
-    isPrimaryYearlyDisabled,
-    isStaticQuarterlyDisabled,
-    isStaticYearlyDisabled,
-  ],
-  () => {
-    if (!isGabung.value) return;
-    if (!primaryDataset.value) return;
-
-    if (primaryAggregation.value === "monthly" && isPrimaryMonthlyDisabled.value) {
-      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
-        return;
-      }
-      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "yearly");
-      }
-    }
-
-    if (primaryAggregation.value === "quarterly" && isPrimaryQuarterlyDisabled.value) {
-      if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "monthly");
-        return;
-      }
-      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "yearly");
-      }
-    }
-
-    if (primaryAggregation.value === "yearly" && isPrimaryYearlyDisabled.value) {
-      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
-        return;
-      }
-      if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
-        chartStore.setAggregation(primaryDataset.value.id, "monthly");
-      }
-    }
-
-    if (staticPeriod.value === "quarterly" && isStaticQuarterlyDisabled.value) {
-      if (!isStaticYearlyDisabled.value) {
-        staticPeriod.value = "yearly";
-      }
-    }
-
-    if (staticPeriod.value === "yearly" && isStaticYearlyDisabled.value) {
-      if (!isStaticQuarterlyDisabled.value) {
-        staticPeriod.value = "quarterly";
-      }
-    }
-  }
-);
-
-const leftPreparedDynamicSeries = computed(() =>
-  chartStore.selectedDataset.map((ds) => {
-    const idx = chartStore.selectedDataset.findIndex((item) => item.id === ds.id);
-    const colors = palette[idx] ?? palette[0];
-    const config = chartStore.getCompareConfig(ds);
-    const rawMeta = getPreparedSeriesMeta(ds, config);
-    const meta = trimMetaByRange(rawMeta, selectedRange.value);
-
-    return {
-      dataset: ds,
-      meta,
-      aggregation: meta.aggregation,
-      colors,
-      measure: config?.measure ?? "nilai",
-      unitLabel: getDatasetUnitLabel(ds, config?.measure ?? "nilai"),
-    };
-  })
-);
-
-const compatibleLeftSeries = computed(() =>
-  leftPreparedDynamicSeries.value.filter((item) => {
-    return item.meta.aggregation === primaryAggregation.value;
-  })
-);
-
-const activeLeftSeries = computed(() => {
-  if (!primaryDataset.value) return [];
-
-  if (!isGabung.value) {
-    return leftPreparedDynamicSeries.value;
-  }
-
-  if (useStackPeriodMerge.value) {
-    return compatibleLeftSeries.value;
-  }
-
-  return leftPreparedDynamicSeries.value;
-});
-
-const hasGrowthSeriesLeft = computed(() =>
-  activeLeftSeries.value.some((item) => item.measure === "pertumbuhan")
-);
-
-const hasValueSeriesLeft = computed(() =>
-  activeLeftSeries.value.some((item) => item.measure !== "pertumbuhan")
-);
-
-const hasMixedMeasureKindsLeft = computed(() => {
-  const kinds = new Set(
-    activeLeftSeries.value.map((item) => item.measure === "pertumbuhan" ? "pertumbuhan" : "nilai")
-  );
-
-  if (isGabung.value && activeStaticDataset.value && staticPeriod.value) {
-    kinds.add(staticMeasure.value === "pertumbuhan" ? "pertumbuhan" : "nilai");
-  }
-
-  return kinds.has("nilai") && kinds.has("pertumbuhan");
-});
-
-const leftPrimaryUnitTitle = computed(() => {
-  if (hasMixedMeasureKindsLeft.value) return "NILAI";
-  if (hasGrowthSeriesLeft.value && !hasValueSeriesLeft.value) return "PERTUMBUHAN (%)";
-  return "NILAI";
-});
-
-const leftSecondaryUnitTitle = computed(() => {
-  if (hasMixedMeasureKindsLeft.value) return "PERTUMBUHAN (%)";
-  return "";
-});
-
-const staticAxisTitle = computed(() =>
-  getAxisTitleForMeasure(staticMeasure.value)
-);
-
-const activeDatasetOrderMap = computed(() => {
-  const map = {};
-
-  activeLeftSeries.value.forEach((item, index) => {
-    map[String(item.dataset.id)] = index;
-  });
-
-  return map;
-});
-
-const hasIncompatibleLeftSeries = computed(() =>
-  leftPreparedDynamicSeries.value.length !== compatibleLeftSeries.value.length
-);
-
-const hasMonthlySeriesLeft = computed(() =>
-  activeLeftSeries.value.some((item) => item.aggregation === "monthly")
-);
-
-const hasQuarterlySeriesLeft = computed(() => {
-  if (activeLeftSeries.value.some((item) => item.aggregation === "quarterly")) return true;
-  return isGabung.value && !!activeStaticDataset.value && staticPeriod.value === "quarterly";
-});
-
-const hasYearlySeriesLeft = computed(() =>
-  activeLeftSeries.value.some((item) => item.aggregation === "yearly") ||
-  (isGabung.value && !!activeStaticDataset.value && staticPeriod.value === "yearly")
-);
-
-const isMixedMonthlyQuarterlyAxis = computed(() =>
-  hasMonthlySeriesLeft.value && hasQuarterlySeriesLeft.value && !hasYearlySeriesLeft.value
-);
-
-const leftMonthlyAxisPeriods = computed(() => {
-  const periods = [];
-  activeLeftSeries.value.forEach((item) => {
-    if (item.aggregation === "monthly") periods.push(...item.meta.periods);
-  });
-  return dedupePeriods(periods);
-});
-
-const leftQuarterlyAxisPeriods = computed(() => {
-  const periods = [];
-  activeLeftSeries.value.forEach((item) => {
-    if (item.aggregation === "quarterly") periods.push(...item.meta.periods);
-  });
-
-  if (isGabung.value && activeStaticDataset.value && staticPeriod.value === "quarterly") {
-    periods.push(...staticSeriesMeta.value.periods);
-  }
-
-  return dedupePeriods(periods);
-});
-
-const leftYearlyAxisPeriods = computed(() => {
-  const periods = [];
-  activeLeftSeries.value.forEach((item) => {
-    if (item.aggregation === "yearly") periods.push(...item.meta.periods);
-  });
-
-  if (isGabung.value && activeStaticDataset.value && staticPeriod.value === "yearly") {
-    periods.push(...staticSeriesMeta.value.periods);
-  }
-
-  return dedupePeriods(periods);
-});
-
-const createDatasetTooltipMeta = ({
-  periods = [],
-  sourceAggregation = "",
-}) => {
-  return {
-    tooltipPeriods: periods,
-    sourceAggregation,
-  };
-};
-
-const getTooltipPeriodForContext = (context) => {
-  const dataset = context?.dataset ?? {};
-  const dataIndex = context?.dataIndex ?? -1;
-  const tooltipPeriods = dataset.tooltipPeriods ?? [];
-
-  return tooltipPeriods[dataIndex] ?? context?.raw?.x ?? null;
-};
-
-const getTooltipAggregationForContext = (context) => {
-  return context?.dataset?.sourceAggregation ?? "";
-};
-
-const buildDatasetStyle = ({
-  chartType = "line",
-  lineColor = "#3B82F6",
-  fillColor = "rgba(59,130,246,0.18)",
-  yAxisID = "y",
-  xAxisID = "xMonthly",
-  isStatic = false,
-  grouped = true,
-  maxBarThickness = 34,
-  categoryPercentage = 0.72,
-  barPercentage = 0.82,
-}) => {
-  if (chartType === "bar") {
-    return {
-      type: "bar",
-      backgroundColor: fillColor,
-      borderColor: lineColor,
-      borderWidth: 2,
-      borderRadius: 4,
-      borderSkipped: false,
-      maxBarThickness,
-      categoryPercentage,
-      barPercentage,
-      grouped,
-      yAxisID,
-      xAxisID,
-      isStatic,
-    };
-  }
-
-  return {
-    type: "line",
-    fill: false,
-    borderColor: lineColor,
-    backgroundColor: fillColor,
-    tension: 0.35,
-    cubicInterpolationMode: "monotone",
-    yAxisID,
-    xAxisID,
-    pointRadius: 3,
-    pointHoverRadius: 5,
-    spanGaps: true,
-    isStatic,
-  };
-};
+}
 
 const isBarVsBarMerge = computed(() =>
   isGabung.value &&
@@ -2156,11 +530,71 @@ watch(
   { immediate: true }
 );
 
-const useStackPeriodMerge = computed(() =>
-  canUsePeriodStackMerge.value && combineBarMode.value === "stack"
+watch(
+  [
+    isGabung,
+    primaryMeasure,
+    primaryAggregation,
+    staticComponent,
+    staticPeriod,
+    canChoosePrimaryMonthly,
+    canChoosePrimaryQuarterly,
+    canChoosePrimaryYearly,
+    isPrimaryMonthlyDisabled,
+    isPrimaryQuarterlyDisabled,
+    isPrimaryYearlyDisabled,
+    isStaticQuarterlyDisabled,
+    isStaticYearlyDisabled,
+  ],
+  () => {
+    if (!isGabung.value) return;
+    if (!primaryDataset.value) return;
+
+    if (primaryAggregation.value === "monthly" && isPrimaryMonthlyDisabled.value) {
+      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
+        return;
+      }
+      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "yearly");
+      }
+    }
+
+    if (primaryAggregation.value === "quarterly" && isPrimaryQuarterlyDisabled.value) {
+      if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "monthly");
+        return;
+      }
+      if (!isPrimaryYearlyDisabled.value && canChoosePrimaryYearly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "yearly");
+      }
+    }
+
+    if (primaryAggregation.value === "yearly" && isPrimaryYearlyDisabled.value) {
+      if (!isPrimaryQuarterlyDisabled.value && canChoosePrimaryQuarterly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "quarterly");
+        return;
+      }
+      if (!isPrimaryMonthlyDisabled.value && canChoosePrimaryMonthly.value) {
+        chartStore.setAggregation(primaryDataset.value.id, "monthly");
+      }
+    }
+
+    if (staticPeriod.value === "quarterly" && isStaticQuarterlyDisabled.value) {
+      if (!isStaticYearlyDisabled.value) {
+        staticPeriod.value = "yearly";
+      }
+    }
+
+    if (staticPeriod.value === "yearly" && isStaticYearlyDisabled.value) {
+      if (!isStaticQuarterlyDisabled.value) {
+        staticPeriod.value = "quarterly";
+      }
+    }
+  }
 );
 
-const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
+function buildMonthlyQuarterlyMergeDatasets(leftSeries, staticDataset) {
   const quarterlyMeta = getSeriesMeta(staticDataset, "quarterly");
   const trimmedQuarterlyMeta = trimMetaByRange(quarterlyMeta, selectedRange.value);
   const quarterPeriods = trimmedQuarterlyMeta.periods ?? [];
@@ -2284,9 +718,9 @@ const buildMonthlyQuarterlyMergeDatasets = (leftSeries, staticDataset) => {
   });
 
   return { labels, datasets };
-};
+}
 
-const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
+function buildMonthlyYearlyMergeDatasets(leftSeries, staticDataset) {
   const yearlyMeta = getSeriesMeta(staticDataset, "yearly");
   const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
   const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
@@ -2347,7 +781,9 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
       });
 
       datasets.push({
-        label: `${getDatasetDisplayName(seriesItem.dataset)} - ${monthNames[slot - 1]}`,
+        label: `${getDatasetDisplayName(seriesItem.dataset)} - ${
+          ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][slot - 1]
+        }`,
         data: monthlySlotMap[slot],
         tooltipPeriods: labels,
         sourceAggregation: "monthly",
@@ -2405,9 +841,9 @@ const buildMonthlyYearlyMergeDatasets = (leftSeries, staticDataset) => {
   });
 
   return { labels, datasets };
-};
+}
 
-const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
+function buildQuarterlyYearlyMergeDatasets(leftSeries, yearlyDataset) {
   const yearlyMeta = getSeriesMeta(yearlyDataset, "yearly");
   const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
   const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
@@ -2529,7 +965,7 @@ const buildQuarterlyYearlyMergeDatasets = (leftSeries, yearlyDataset) => {
   });
 
   return { labels, datasets };
-};
+}
 
 const chartDataL = computed(() => {
   const staticDs = activeStaticDataset.value;
@@ -2622,6 +1058,14 @@ const chartDataL = computed(() => {
   };
 });
 
+watch(
+  chartDataL,
+  (val) => {
+    chartDataLBridge.value = val;
+  },
+  { immediate: true, deep: true }
+);
+
 const rightAxisId = computed(() =>
   staticPeriod.value === "yearly" ? "xYearly" : "xQuarterly"
 );
@@ -2693,404 +1137,81 @@ const valueLabelPlugin = {
   },
 };
 
-const buildSnapshotPieces = async () => {
-  await nextTick();
+onMounted(async () => {
+  await withPageBusy(async () => {
+    await loadPdbComponentOptions();
+    const result = await reloadBySelectedComponent();
+    staticPeriod.value = result.staticPeriod;
+    staticMethod.value = result.staticMethod;
+  });
+});
 
-  const canvas = rightPanelRef.value?.querySelector("canvas");
-  const leftBox = leftPanelRef.value?.getBoundingClientRect();
-
-  if (!canvas || !leftBox) {
-    snapshotPieces.value = [];
-    return false;
-  }
-
-  const canvasRect = canvas.getBoundingClientRect();
-  const dataUrl = canvas.toDataURL("image/png");
-
-  const cols = 6;
-  const rows = 4;
-  const pieceW = canvasRect.width / cols;
-  const pieceH = canvasRect.height / rows;
-
-  const targetX = leftBox.left + leftBox.width * 0.28;
-  const targetY = leftBox.top + leftBox.height * 0.42;
-
-  const pieces = [];
-
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const index = row * cols + col;
-
-      const startLeft = canvasRect.left + col * pieceW;
-      const startTop = canvasRect.top + row * pieceH;
-
-      const destLeft = targetX + (Math.random() * 120 - 60);
-      const destTop = targetY + (Math.random() * 70 - 35);
-
-      const dx = destLeft - startLeft;
-      const dy = destTop - startTop;
-
-      const arc = -(60 + Math.random() * 90);
-      const rot = `${-90 + Math.random() * 180}deg`;
-      const scale = (0.2 + Math.random() * 0.35).toFixed(2);
-      const delay = `${index * 18}ms`;
-
-      pieces.push({
-        id: `piece-${index}`,
-        style: {
-          left: `${startLeft}px`,
-          top: `${startTop}px`,
-          width: `${pieceW + 0.5}px`,
-          height: `${pieceH + 0.5}px`,
-          backgroundImage: `url("${dataUrl}")`,
-          backgroundSize: `${canvasRect.width}px ${canvasRect.height}px`,
-          backgroundPosition: `-${col * pieceW}px -${row * pieceH}px`,
-          "--dx": `${dx}px`,
-          "--dy": `${dy}px`,
-          "--arc": `${arc}px`,
-          "--rot": rot,
-          "--scale": scale,
-          "--delay": delay,
-        },
-      });
-    }
-  }
-
-  snapshotPieces.value = pieces;
-  return true;
-};
-
-const onToggleGabung = async () => {
-  if (isCombineDisabled.value || isPageBusy.value) return;
-
-  if (isGabung.value) {
-    isMerging.value = true;
-    mergePhase.value = "absorb";
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    isGabung.value = false;
-    await wait(700);
-    mergePhase.value = "idle";
-    isMerging.value = false;
-    snapshotPiecesVisible.value = false;
-    snapshotPieces.value = [];
+watch(staticComponent, async (val, oldVal) => {
+  if (!val) {
+    staticPeriod.value = "";
+    staticMethod.value = "";
+    resetAllDataState();
     return;
   }
 
-  isMerging.value = true;
+  if (val === oldVal) return;
 
-  mergePhase.value = "lift";
-  await wait(240);
-
-  mergePhase.value = "freeze";
-  await wait(freezeDuration);
-
-  await buildSnapshotPieces();
-  snapshotPiecesVisible.value = true;
-
-  mergePhase.value = "transfer";
-  await wait(620);
-
-  isGabung.value = true;
-
-  await nextTick();
-  mergePhase.value = "absorb";
-  await wait(520);
-
-  snapshotPiecesVisible.value = false;
-  snapshotPieces.value = [];
-  mergePhase.value = "idle";
-  isMerging.value = false;
-};
-
-const leftAxisVisibility = computed(() => {
-  if (useStackPeriodMerge.value) {
-    return {
-      monthly: false,
-      quarterly: false,
-      yearly: false,
-    };
+  if (!staticPeriod.value) {
+    staticPeriod.value = "quarterly";
   }
 
-  return {
-    monthly: hasMonthlySeriesLeft.value,
-    quarterly: hasQuarterlySeriesLeft.value,
-    yearly: hasYearlySeriesLeft.value,
-  };
-});
-
-const rightAxisVisibility = computed(() => ({
-  monthly: false,
-  quarterly: staticPeriod.value === "quarterly",
-  yearly: staticPeriod.value === "yearly",
-}));
-
-const activeMonthlyMethod = computed(() => {
-  if (primaryMeasure.value !== "pertumbuhan" || primaryAggregation.value !== "monthly") return "";
-  return primaryMethod.value ?? "";
-});
-
-const shouldStackQuarterly = computed(() =>
-  !useStackPeriodMerge.value &&
-  isGabung.value &&
-  dynamicChartType.value === "bar" &&
-  staticChartType.value === "bar" &&
-  combineBarMode.value === "stack" &&
-  staticPeriod.value === "quarterly" &&
-  primaryAggregation.value === "quarterly" &&
-  primaryMeasure.value === "nilai" &&
-  staticMeasure.value === "nilai"
-);
-
-const shouldStackYearly = computed(() =>
-  !useStackPeriodMerge.value &&
-  isGabung.value &&
-  dynamicChartType.value === "bar" &&
-  staticChartType.value === "bar" &&
-  combineBarMode.value === "stack" &&
-  staticPeriod.value === "yearly" &&
-  primaryAggregation.value === "yearly" &&
-  primaryMeasure.value === "nilai" &&
-  staticMeasure.value === "nilai"
-);
-
-const buildChartOptions = (chartTypeRef, isRightChart = false) =>
-  computed(() => {
-    const axisVisibility = isRightChart ? rightAxisVisibility.value : leftAxisVisibility.value;
-    const monthlyPeriods = isRightChart ? [] : leftMonthlyAxisPeriods.value;
-    const quarterlyPeriods = isRightChart
-      ? (staticPeriod.value === "quarterly" ? staticSeriesMeta.value.periods : [])
-      : leftQuarterlyAxisPeriods.value;
-    const yearlyPeriods = isRightChart
-      ? (staticPeriod.value === "yearly" ? staticSeriesMeta.value.periods : [])
-      : leftYearlyAxisPeriods.value;
-
-    return {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: {
-        duration: 900,
-        easing: "easeInOutQuart",
-      },
-      animations: {
-        x: { duration: 900, easing: "easeInOutQuart" },
-        y: { duration: 900, easing: "easeInOutQuart" },
-        tension: { duration: 900, easing: "easeInOutQuart" },
-        radius: { duration: 900, easing: "easeInOutQuart" },
-      },
-      transitions: {
-        active: {
-          animation: {
-            duration: 300,
-          },
-        },
-      },
-      layout: {
-        padding: {
-          left: 14,
-          right: 12,
-          top: 16,
-          bottom: 8,
-        },
-      },
-      plugins: {
-        legend: {
-          labels: {
-            color: theme.value.text,
-            boxWidth: 42,
-            boxHeight: 14,
-            padding: 12,
-          },
-        },
-        tooltip: {
-          enabled: true,
-          callbacks: {
-            title(items) {
-              if (!items?.length) return "";
-
-              const uniquePeriods = [...new Set(
-                items
-                  .map((item) => {
-                    const period = getTooltipPeriodForContext(item);
-                    const aggregation = getTooltipAggregationForContext(item);
-                    return formatTooltipPeriod(period, aggregation);
-                  })
-                  .filter(Boolean)
-              )];
-
-              if (uniquePeriods.length === 1) {
-                return uniquePeriods[0];
-              }
-
-              return "";
-            },
-            label(context) {
-              const label = context.dataset?.label ?? "";
-              const value = context.parsed?.y;
-              const tooltipPeriod = getTooltipPeriodForContext(context);
-              const aggregation = getTooltipAggregationForContext(context);
-              const formattedPeriod = formatTooltipPeriod(tooltipPeriod, aggregation);
-
-              const formattedValue =
-                value === null || value === undefined
-                  ? "-"
-                  : Number(value).toLocaleString("id-ID", {
-                      minimumFractionDigits: 0,
-                      maximumFractionDigits: 2,
-                    });
-
-              if (formattedPeriod) {
-                return `${label} (${formattedPeriod}): ${formattedValue}`;
-              }
-
-              return `${label}: ${formattedValue}`;
-            },
-          },
-        },
-      },
-      scales: {
-        xMonthly: {
-          type: "category",
-          position: "bottom",
-          display: axisVisibility.monthly,
-          offset: chartTypeRef.value === "bar",
-          stacked: false,
-          labels: monthlyPeriods,
-          ticks: {
-            color: theme.value.textSecondary,
-            maxRotation: 0,
-            minRotation: 0,
-            padding: 10,
-            callback(value, index) {
-              const raw = this.getLabelForValue(value);
-              return buildMonthlyTickLabel(
-                raw,
-                index,
-                monthlyPeriods.length,
-                activeMonthlyMethod.value
-              );
-            },
-          },
-          grid: { color: theme.value.border },
-          title: { display: false },
-        },
-        xQuarterly: {
-          type: "category",
-          position: "bottom",
-          display: axisVisibility.quarterly,
-          offset: chartTypeRef.value === "bar",
-          stacked: shouldStackQuarterly.value,
-          labels: quarterlyPeriods,
-          ticks: {
-            color: theme.value.textSecondary,
-            maxRotation: 0,
-            minRotation: 0,
-            padding: 10,
-            callback(value, index) {
-              const raw = this.getLabelForValue(value);
-              return buildQuarterlyTickLabel(
-                raw,
-                index,
-                quarterlyPeriods.length,
-                isMixedMonthlyQuarterlyAxis.value || isRightChart
-              );
-            },
-          },
-          grid: {
-            display: !axisVisibility.monthly,
-            color: theme.value.border,
-          },
-        },
-        xYearly: {
-          type: "category",
-          position: "bottom",
-          display: axisVisibility.yearly,
-          offset: chartTypeRef.value === "bar",
-          stacked: shouldStackYearly.value,
-          labels: yearlyPeriods,
-          ticks: {
-            color: theme.value.textSecondary,
-            maxRotation: 0,
-            minRotation: 0,
-            padding: 10,
-            callback(value) {
-              const raw = this.getLabelForValue(value);
-              return formatYearTick(raw);
-            },
-          },
-          grid: {
-            display: !axisVisibility.monthly && !axisVisibility.quarterly,
-            color: theme.value.border,
-          },
-        },
-        xQuarterlyMerge: {
-          type: "category",
-          position: "bottom",
-          display: !isRightChart && useStackPeriodMerge.value && staticPeriod.value === "quarterly",
-          offset: true,
-          stacked: true,
-          labels: chartDataL.value.labels ?? [],
-          ticks: {
-            color: theme.value.textSecondary,
-            maxRotation: 0,
-            minRotation: 0,
-            padding: 10,
-            callback(value) {
-              const raw = this.getLabelForValue(value);
-              return formatQuarterMergeTickLabel(raw);
-            },
-          },
-          grid: { color: theme.value.border },
-        },
-        xYearlyMerge: {
-          type: "category",
-          position: "bottom",
-          display: !isRightChart && useStackPeriodMerge.value && staticPeriod.value === "yearly",
-          offset: true,
-          stacked: true,
-          labels: chartDataL.value.labels ?? [],
-          ticks: {
-            color: theme.value.textSecondary,
-            maxRotation: 0,
-            minRotation: 0,
-            padding: 10,
-            callback(value) {
-              const raw = this.getLabelForValue(value);
-              return formatYearMergeTickLabel(raw, primaryAggregation.value);
-            },
-          },
-          grid: { color: theme.value.border },
-        },
-        y: {
-          position: "left",
-          beginAtZero: false,
-          stacked: useStackPeriodMerge.value,
-          ticks: { color: theme.value.textSecondary },
-          grid: { color: theme.value.border },
-          title: {
-            display: true,
-            color: theme.value.textSecondary,
-            text: isRightChart ? staticAxisTitle.value : leftPrimaryUnitTitle.value,
-          },
-        },
-        y1: {
-          position: "right",
-          beginAtZero: false,
-          stacked: useStackPeriodMerge.value || shouldStackQuarterly.value || shouldStackYearly.value,
-          display: !isRightChart && hasMixedMeasureKindsLeft.value,
-          ticks: { color: theme.value.textSecondary },
-          grid: { drawOnChartArea: false },
-          title: {
-            display: !isRightChart && hasMixedMeasureKindsLeft.value,
-            color: theme.value.textSecondary,
-            text: leftSecondaryUnitTitle.value,
-          },
-        },
-      },
-    };
+  await withPageBusy(async () => {
+    const result = await reloadBySelectedComponent();
+    staticPeriod.value = result.staticPeriod;
+    staticMethod.value = result.staticMethod;
   });
+});
 
-const chartOptionsL = buildChartOptions(dynamicChartType, false);
-const chartOptionsR = buildChartOptions(staticChartType, true);
+watch(staticMeasure, async () => {
+  await withPageBusy(async () => {
+    if (staticPeriod.value === "quarterly") {
+      staticMethod.value = "qtoq";
+    } else if (staticPeriod.value === "yearly") {
+      staticMethod.value = "annual";
+    }
+
+    await loadActiveStaticDataset();
+  });
+});
+
+watch(staticPeriod, (val) => {
+  if (!val) {
+    staticMethod.value = "";
+    return;
+  }
+
+  if (val === "quarterly") {
+    staticMethod.value = "qtoq";
+    return;
+  }
+
+  if (val === "yearly") {
+    staticMethod.value = "annual";
+  }
+});
+
+watch(componentRuleMode, async () => {
+  const filtered = filteredPdbIndicatorOptions.value;
+
+  if (!filtered.length) {
+    staticComponent.value = "";
+    resetAllDataState();
+    return;
+  }
+
+  const stillExists = filtered.some(
+    (item) => String(item.kode) === String(staticComponent.value)
+  );
+
+  if (!stillExists) {
+    staticComponent.value = String(filtered[0].kode);
+  }
+});
 
 const leftChartKey = computed(() => {
   const datasetId = primaryDataset.value?.id ?? "no-dataset";
