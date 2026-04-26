@@ -2,6 +2,13 @@
 import { computed } from "vue";
 import { useChartStore } from "../stores/useChartStore";
 import LineChartComponent from "./LineChartComponent.vue";
+import {
+  normalizeTextKey,
+  normalizeUnitLabel,
+  getAvailableDisplayUnits,
+  convertSeriesMetaByUnit,
+  formatChartNumber,
+} from "../utils/chartHelpers";
 
 const props = defineProps({
   datasets: Object,
@@ -46,6 +53,78 @@ const hasValidSeriesData = (seriesLike) => {
   const data = Array.isArray(seriesLike?.data) ? seriesLike.data : [];
   return data.some((value) => isFiniteNumber(value));
 };
+
+function getDatasetUnitLabel(dataset, measure = "nilai") {
+  if (measure === "pertumbuhan") return "%";
+
+  const codeCandidates = [
+    dataset?.apiCode,
+    dataset?.kode,
+    dataset?.code,
+    dataset?.sourceCode,
+    dataset?.meta?.kode,
+    dataset?.meta?.code,
+  ]
+    .map((v) => String(v ?? "").trim())
+    .filter(Boolean);
+
+  const nameCandidates = [
+    dataset?.indicatorName,
+    dataset?.deskripsi,
+    dataset?.label,
+    dataset?.name,
+    dataset?.meta?.deskripsi,
+    dataset?.meta?.label,
+  ]
+    .map((v) => normalizeTextKey(v))
+    .filter(Boolean);
+
+  let rawUnit =
+    dataset?.valueUnitLabel ??
+    dataset?.satuan ??
+    dataset?.unit ??
+    dataset?.satuanLabel ??
+    dataset?.meta?.satuan ??
+    dataset?.meta?.unit ??
+    "";
+
+  if (!rawUnit) {
+    // tidak ada lookup map di card, jadi fallback dari dataset saja
+  }
+
+  return normalizeUnitLabel(rawUnit, "Nilai");
+}
+
+const baseUnitLabel = computed(() =>
+  getDatasetUnitLabel(props.datasets, config.value?.measure ?? "nilai")
+);
+
+const displayUnitOptions = computed(() => {
+  const available = getAvailableDisplayUnits(baseUnitLabel.value);
+  return available.map((unit) => ({
+    value: unit,
+    label: unit,
+  }));
+});
+
+const effectiveDisplayUnit = computed(() => {
+  const baseUnit = baseUnitLabel.value;
+  const available = getAvailableDisplayUnits(baseUnit);
+  const savedUnit = config.value?.displayUnit ?? null;
+
+  if ((config.value?.measure ?? "nilai") !== "nilai") return baseUnit;
+  if (!available.length) return baseUnit;
+  if (savedUnit && available.includes(savedUnit)) return savedUnit;
+
+  return baseUnit;
+});
+
+const showDisplayUnitFilter = computed(() => {
+  return (
+    (config.value?.measure ?? "nilai") === "nilai" &&
+    displayUnitOptions.value.length > 1
+  );
+});
 
 const allowMonthlyByMeta = computed(() => {
   const value = props.datasets?.aggregationAvailability?.allowMonthly;
@@ -130,25 +209,67 @@ const getSeriesByConfig = (dataset, cfg) => {
     return {
       data: dataset?.series?.[aggregation] ?? [],
       periods: dataset?.derivedPeriods?.[aggregation] ?? [],
+      aggregation,
     };
   }
 
   if (aggregation === "yearly") {
-    return dataset?.growth?.yearly ?? { data: [], periods: [] };
+    const payload = dataset?.growth?.yearly ?? { data: [], periods: [] };
+
+    if (Array.isArray(payload)) {
+      return {
+        data: payload,
+        periods: dataset?.derivedPeriods?.yearly ?? [],
+        aggregation,
+      };
+    }
+
+    return {
+      data: payload?.data ?? [],
+      periods: payload?.periods ?? dataset?.derivedPeriods?.yearly ?? [],
+      aggregation,
+    };
   }
 
   if (aggregation === "monthly" && method === "yony") {
-    return (
+    const payload =
       dataset?.growth?.monthly?.yony_m ??
       dataset?.growth?.monthly?.yony ??
-      { data: [], periods: [] }
-    );
+      { data: [], periods: [] };
+
+    return {
+      data: Array.isArray(payload) ? payload : payload?.data ?? [],
+      periods: Array.isArray(payload?.periods)
+        ? payload.periods
+        : dataset?.derivedPeriods?.monthly ?? [],
+      aggregation,
+    };
   }
 
-  return dataset?.growth?.[aggregation]?.[method] ?? { data: [], periods: [] };
+  const payload = dataset?.growth?.[aggregation]?.[method] ?? { data: [], periods: [] };
+
+  return {
+    data: Array.isArray(payload) ? payload : payload?.data ?? [],
+    periods: Array.isArray(payload?.periods)
+      ? payload.periods
+      : dataset?.derivedPeriods?.[aggregation] ?? [],
+    aggregation,
+  };
 };
 
-const preparedSeries = computed(() => getSeriesByConfig(props.datasets, config.value));
+const rawPreparedSeries = computed(() => getSeriesByConfig(props.datasets, config.value));
+
+const preparedSeries = computed(() => {
+  const measure = config.value?.measure ?? "nilai";
+  const baseUnit = getDatasetUnitLabel(props.datasets, measure);
+  const targetUnit = effectiveDisplayUnit.value;
+
+  if (measure !== "nilai") {
+    return rawPreparedSeries.value;
+  }
+
+  return convertSeriesMetaByUnit(rawPreparedSeries.value, baseUnit, targetUnit);
+});
 
 const getLastNonNull = (arr) => {
   for (let i = arr.length - 1; i >= 0; i--) {
@@ -173,18 +294,35 @@ const isGrowthMode = computed(() => (config.value?.measure ?? "nilai") === "pert
 
 const displayValue = computed(() => {
   if (last.value === null || last.value === undefined) return "-";
+
   const suffix = isGrowthMode.value ? "%" : "";
-  return `${Number(last.value).toFixed(2)}${suffix}`;
+  return `${formatChartNumber(last.value, {
+    minFractionDigits: 0,
+    maxFractionDigits: 2,
+    fallback: "-",
+  })}${suffix}`;
 });
 
 const metricSecondaryText = computed(() => {
-  const latestNilai =
+  const latestNilaiRaw =
     getLastNonNull(props.datasets?.series?.monthly ?? []) ??
     getLastNonNull(props.datasets?.series?.quarterly ?? []) ??
     getLastNonNull(props.datasets?.series?.yearly ?? []);
 
-  if (latestNilai === null || latestNilai === undefined) return "-";
-  return Number(latestNilai).toFixed(2);
+  if (latestNilaiRaw === null || latestNilaiRaw === undefined) return "-";
+
+  const converted = convertSeriesMetaByUnit(
+    { data: [latestNilaiRaw], periods: [] },
+    getDatasetUnitLabel(props.datasets, "nilai"),
+    effectiveDisplayUnit.value
+  );
+
+  const value = converted?.data?.[0];
+  return formatChartNumber(value, {
+    minFractionDigits: 0,
+    maxFractionDigits: 2,
+    fallback: "-",
+  });
 });
 
 const trendDirection = computed(() => {
@@ -317,6 +455,10 @@ const onAggregationChange = (e) => {
 const onMethodChange = (e) => {
   chartStore.setMethod(props.datasets.id, e.target.value);
 };
+
+const onDisplayUnitChange = (e) => {
+  chartStore.setDisplayUnit(props.datasets.id, e.target.value);
+};
 </script>
 
 <template>
@@ -428,6 +570,24 @@ const onMethodChange = (e) => {
         >
           <option value="" disabled>Pilih metode</option>
           <option v-for="opt in currentMethodOptions" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+      </div>
+
+      <div v-if="showDisplayUnitFilter" class="mt-3">
+        <label class="block text-[12px] mb-1 theme-text-muted">Satuan Rupiah</label>
+        <select
+          class="w-full rounded-md text-[13px] px-2 py-2 theme-select"
+          :value="effectiveDisplayUnit"
+          @change="onDisplayUnitChange"
+        >
+          <option value="" disabled>Pilih satuan</option>
+          <option
+            v-for="opt in displayUnitOptions"
+            :key="opt.value"
+            :value="opt.value"
+          >
             {{ opt.label }}
           </option>
         </select>

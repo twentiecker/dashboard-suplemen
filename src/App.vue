@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed, watch, nextTick } from "vue";
+import { ref, onMounted, onBeforeUnmount, computed, watch, nextTick } from "vue";
 import { useChartStore } from "./stores/useChartStore";
 import CardComponent from "./components/CardComponent.vue";
 import LeftPanel from "./components/LeftPanel.vue";
@@ -18,6 +18,8 @@ import { wait, waitUntil } from "./utils/asyncHelpers";
 import {
   normalizeTextKey,
   normalizeUnitLabel,
+  getAvailableDisplayUnits,
+  convertSeriesMetaByUnit,
   getDatasetDisplayName,
   trimMetaByRange,
   normalizeYearLikePeriod,
@@ -28,6 +30,7 @@ import {
   getDatasetStackColor,
   createDatasetTooltipMeta,
   buildDatasetStyle,
+  formatChartNumber,
 } from "./utils/chartHelpers";
 
 import { useLoadingOverlay } from "./composables/useLoadingOverlay";
@@ -42,6 +45,7 @@ const staticComponent = ref("");
 const staticPeriod = ref("");
 const staticMethod = ref("");
 const staticMeasure = ref("pertumbuhan");
+const staticDisplayUnit = ref("");
 
 const dynamicChartType = ref("line");
 const staticChartType = ref("line");
@@ -51,12 +55,68 @@ const selectedProvince = ref("indonesia");
 const selectedRange = ref("8Y");
 
 const componentRuleMode = ref("admin");
-// pilihan: admin | pkrt | pkp | pmtb | xm
 
 const leftPanelRef = ref(null);
 const rightPanelRef = ref(null);
 
 const isPageBusy = ref(false);
+
+const isPresetPopoverOpen = ref(false);
+const presetPopoverRef = ref(null);
+
+const presetActionMessage = ref("");
+const presetActionType = ref("");
+let presetMessageTimer = null;
+
+const togglePresetPopover = () => {
+  if (!canSaveCurrentIndicator.value) return;
+  isPresetPopoverOpen.value = !isPresetPopoverOpen.value;
+
+  if (!isPresetPopoverOpen.value) {
+    clearPresetMessage();
+  }
+};
+
+const closePresetPopover = () => {
+  isPresetPopoverOpen.value = false;
+  clearPresetMessage();
+};
+
+const showPresetMessage = (message, type = "success") => {
+  presetActionMessage.value = message;
+  presetActionType.value = type;
+
+  if (presetMessageTimer) {
+    clearTimeout(presetMessageTimer);
+  }
+
+  presetMessageTimer = window.setTimeout(() => {
+    presetActionMessage.value = "";
+    presetActionType.value = "";
+    presetMessageTimer = null;
+  }, 1800);
+};
+
+const clearPresetMessage = () => {
+  presetActionMessage.value = "";
+  presetActionType.value = "";
+
+  if (presetMessageTimer) {
+    clearTimeout(presetMessageTimer);
+    presetMessageTimer = null;
+  }
+};
+
+const handleDocumentClick = (event) => {
+  if (!isPresetPopoverOpen.value) return;
+
+  const root = presetPopoverRef.value;
+  if (!root) return;
+
+  if (!root.contains(event.target)) {
+    closePresetPopover();
+  }
+};
 
 const {
   loadingStageText,
@@ -98,9 +158,98 @@ const primaryMeasure = computed(() => {
   return chartStore.compareConfigs[id]?.measure ?? "";
 });
 
-/**
- * Bridge refs untuk memutus circular dependency antar composable
- */
+const canSaveCurrentIndicator = computed(() => {
+  return !!primaryDataset.value && chartStore.selectedCount === 1 && !isGabung.value;
+});
+
+const primarySavedSlots = computed(() => {
+  if (!primaryDataset.value) return {};
+  return chartStore.getSavedSlotsByDatasetId(primaryDataset.value.id);
+});
+
+const hasSavedSlot1 = computed(() => !!primarySavedSlots.value?.slot1);
+const hasSavedSlot2 = computed(() => !!primarySavedSlots.value?.slot2);
+
+const saveStatusText = computed(() => {
+  if (!primaryDataset.value) return "Pilih 1 indikator untuk menggunakan preset tampilan.";
+  if (isGabung.value) return "Preset dinonaktifkan saat mode gabung aktif.";
+  if (chartStore.selectedCount !== 1) return "Preset hanya aktif saat 1 indikator dipilih.";
+  return "Simpan atau muat ulang kondisi dua chart untuk indikator aktif.";
+});
+
+const formatSavedAt = (timestamp) => {
+  if (!timestamp) return "";
+
+  try {
+    return new Intl.DateTimeFormat("id-ID", {
+      day: "2-digit",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(timestamp));
+  } catch {
+    return "";
+  }
+};
+
+const slot1Meta = computed(() => primarySavedSlots.value?.slot1 ?? null);
+const slot2Meta = computed(() => primarySavedSlots.value?.slot2 ?? null);
+
+const slot1SavedAtText = computed(() => formatSavedAt(slot1Meta.value?.savedAt));
+const slot2SavedAtText = computed(() => formatSavedAt(slot2Meta.value?.savedAt));
+
+const presetNameDrafts = ref({
+  1: "",
+  2: "",
+});
+
+const getSlotCustomName = (slot) => {
+  const meta = slot === 1 ? slot1Meta.value : slot2Meta.value;
+  return String(meta?.customName ?? `Preset ${slot}`);
+};
+
+const openRenameDraft = (slot) => {
+  presetNameDrafts.value[slot] = getSlotCustomName(slot);
+};
+
+watch(
+  isPresetPopoverOpen,
+  (open) => {
+    if (!open) return;
+    presetNameDrafts.value[1] = getSlotCustomName(1);
+    presetNameDrafts.value[2] = getSlotCustomName(2);
+  },
+  { immediate: false }
+);
+
+const handleRenameSlot = (slot) => {
+  if (!primaryDataset.value) return;
+
+  const success = chartStore.renameSavedIndicatorState(
+    primaryDataset.value.id,
+    slot,
+    presetNameDrafts.value[slot]
+  );
+
+  if (!success) return;
+
+  showPresetMessage(`Nama preset ${slot} diperbarui`, "success");
+};
+
+const getSlotStatusLabel = (hasSaved) => {
+  return hasSaved ? "Saved" : "Empty";
+};
+
+const handleClearSlot = (slot) => {
+  if (!primaryDataset.value) return;
+  if (!canSaveCurrentIndicator.value) return;
+
+  const cleared = chartStore.clearSavedIndicatorState(primaryDataset.value.id, slot);
+  if (!cleared) return;
+
+  showPresetMessage(`Preset ${slot} dihapus`, "info");
+};
+
 const isGabungBridge = ref(false);
 const isCombineDisabledBridge = ref(false);
 
@@ -165,6 +314,7 @@ watch(
   isGabung,
   (val) => {
     isGabungBridge.value = val;
+    if (val) closePresetPopover();
   },
   { immediate: true }
 );
@@ -232,10 +382,215 @@ function getDatasetUnitLabel(dataset, measure = "nilai") {
   return normalizeUnitLabel(rawUnit, "Nilai");
 }
 
+const primaryBaseUnitLabel = computed(() => {
+  if (!primaryDataset.value) return "";
+  return getDatasetUnitLabel(primaryDataset.value, primaryMeasure.value || "nilai");
+});
+
+const primaryDisplayUnitOptions = computed(() => {
+  const available = getAvailableDisplayUnits(primaryBaseUnitLabel.value);
+  return available.map((unit) => ({
+    value: unit,
+    label: unit,
+  }));
+});
+
+const primaryDisplayUnit = computed(() => {
+  if (!primaryDataset.value) return "";
+
+  const id = String(primaryDataset.value.id);
+  const configuredDisplayUnit = chartStore.compareConfigs[id]?.displayUnit ?? null;
+  const available = getAvailableDisplayUnits(primaryBaseUnitLabel.value);
+
+  if (!available.length) return "";
+  if (available.includes(configuredDisplayUnit)) return configuredDisplayUnit;
+
+  return primaryBaseUnitLabel.value;
+});
+
+const showPrimaryDisplayUnitFilter = computed(() => {
+  return (
+    !!primaryDataset.value &&
+    primaryMeasure.value === "nilai" &&
+    primaryDisplayUnitOptions.value.length > 1
+  );
+});
+
+const onPrimaryDisplayUnitChange = (displayUnit) => {
+  if (!primaryDataset.value) return;
+  chartStore.setDisplayUnit(primaryDataset.value.id, displayUnit);
+};
+
+const staticBaseUnitLabel = computed(() => {
+  if (!activeStaticDataset.value) return "";
+  return getDatasetUnitLabel(activeStaticDataset.value, staticMeasure.value || "nilai");
+});
+
+const staticDisplayUnitOptions = computed(() => {
+  const available = getAvailableDisplayUnits(staticBaseUnitLabel.value);
+
+  if (staticMeasure.value !== "nilai") {
+    return [];
+  }
+
+  return available.length > 1
+    ? available.map((unit) => ({
+        value: unit,
+        label: unit,
+      }))
+    : [];
+});
+
+const effectiveStaticDisplayUnit = computed(() => {
+  if (staticMeasure.value !== "nilai") return staticBaseUnitLabel.value;
+
+  const available = getAvailableDisplayUnits(staticBaseUnitLabel.value);
+
+  if (!available.length) return staticBaseUnitLabel.value;
+  if (staticDisplayUnit.value && available.includes(staticDisplayUnit.value)) {
+    return staticDisplayUnit.value;
+  }
+
+  return staticBaseUnitLabel.value;
+});
+
+const showStaticDisplayUnitFilter = computed(() => {
+  return (
+    !!activeStaticDataset.value &&
+    staticMeasure.value === "nilai" &&
+    staticDisplayUnitOptions.value.length > 1
+  );
+});
+
+const onStaticDisplayUnitChange = (displayUnit) => {
+  staticDisplayUnit.value = displayUnit;
+};
+
+function getDisplayUnitForDataset(dataset, measure = "nilai") {
+  const baseUnit = getDatasetUnitLabel(dataset, measure);
+
+  if (measure !== "nilai") return baseUnit;
+
+  const id = String(dataset?.id ?? "");
+  if (!id) return baseUnit;
+
+  const available = getAvailableDisplayUnits(baseUnit);
+  if (!available.length) return baseUnit;
+
+  const configuredDisplayUnit = chartStore.compareConfigs[id]?.displayUnit ?? null;
+
+  return available.includes(configuredDisplayUnit)
+    ? configuredDisplayUnit
+    : baseUnit;
+}
+
 function getLegendLabelWithUnit(dataset, measure = "nilai") {
   const name = getDatasetDisplayName(dataset);
-  const unit = getDatasetUnitLabel(dataset, measure);
+  const unit = getDisplayUnitForDataset(dataset, measure);
   return unit ? `${name} (${unit})` : name;
+}
+
+function getStaticLegendLabelWithUnit(dataset, measure = "nilai") {
+  const name = getDatasetDisplayName(dataset);
+
+  if (measure !== "nilai") {
+    const unit = getDatasetUnitLabel(dataset, measure);
+    return unit ? `${name} (${unit})` : name;
+  }
+
+  const unit = effectiveStaticDisplayUnit.value || getDatasetUnitLabel(dataset, measure);
+  return unit ? `${name} (${unit})` : name;
+}
+
+function getConvertedMetaForDataset(dataset, measure, meta) {
+  const baseUnit = getDatasetUnitLabel(dataset, measure);
+
+  if (measure !== "nilai") return meta;
+
+  const displayUnit = getDisplayUnitForDataset(dataset, measure);
+
+  return convertSeriesMetaByUnit(meta, baseUnit, displayUnit);
+}
+
+function getConvertedStaticMeta(meta, measure) {
+  const baseUnit =
+    activeStaticDataset.value
+      ? getDatasetUnitLabel(activeStaticDataset.value, measure)
+      : "";
+
+  if (measure !== "nilai") return meta;
+
+  const available = getAvailableDisplayUnits(baseUnit);
+  const targetUnit = available.includes(effectiveStaticDisplayUnit.value)
+    ? effectiveStaticDisplayUnit.value
+    : baseUnit;
+
+  return convertSeriesMetaByUnit(meta, baseUnit, targetUnit);
+}
+
+function handleSaveSlot(slot) {
+  if (!primaryDataset.value) return;
+  if (!canSaveCurrentIndicator.value) return;
+
+  const alreadySaved = chartStore.hasSavedSlot(primaryDataset.value.id, slot);
+
+  chartStore.saveIndicatorState(primaryDataset.value.id, {
+    slot,
+    customName: presetNameDrafts.value[slot],
+    uiState: {
+      selectedRange: selectedRange.value,
+      selectedProvince: selectedProvince.value,
+      dynamicChartType: dynamicChartType.value,
+      combineBarMode: combineBarMode.value,
+    },
+    staticState: {
+      staticComponent: staticComponent.value,
+      staticMeasure: staticMeasure.value,
+      staticPeriod: staticPeriod.value,
+      staticMethod: staticMethod.value,
+      staticChartType: staticChartType.value,
+      staticDisplayUnit: staticDisplayUnit.value,
+    },
+  });
+
+  presetNameDrafts.value[slot] = getSlotCustomName(slot);
+
+  showPresetMessage(
+    alreadySaved
+      ? `Preset ${slot} berhasil diperbarui`
+      : `Preset ${slot} berhasil disimpan`,
+    "success"
+  );
+}
+
+async function handleLoadSlot(slot) {
+  if (!primaryDataset.value) return;
+  if (!canSaveCurrentIndicator.value) return;
+
+  const saved = chartStore.loadIndicatorState(primaryDataset.value.id, slot);
+  if (!saved) return;
+
+  const nextDynamicConfig = saved?.dynamicConfig ?? {};
+  const nextUiState = saved?.uiState ?? {};
+  const nextStaticState = saved?.staticState ?? {};
+
+  chartStore.applyConfig(primaryDataset.value.id, nextDynamicConfig);
+
+  selectedRange.value = nextUiState?.selectedRange ?? selectedRange.value;
+  selectedProvince.value = nextUiState?.selectedProvince ?? selectedProvince.value;
+  dynamicChartType.value = nextUiState?.dynamicChartType ?? dynamicChartType.value;
+  combineBarMode.value = nextUiState?.combineBarMode ?? combineBarMode.value;
+
+  staticComponent.value = nextStaticState?.staticComponent ?? "";
+  staticMeasure.value = nextStaticState?.staticMeasure ?? "pertumbuhan";
+  staticPeriod.value = nextStaticState?.staticPeriod ?? "";
+  staticMethod.value = nextStaticState?.staticMethod ?? "";
+  staticChartType.value = nextStaticState?.staticChartType ?? "line";
+  staticDisplayUnit.value = nextStaticState?.staticDisplayUnit ?? "";
+
+  showPresetMessage(`Preset ${slot} berhasil dimuat`, "success");
+  closePresetPopover();
+  await nextTick();
 }
 
 const activeMonthlyMethod = computed(() => {
@@ -312,9 +667,6 @@ const shouldStackYearly = computed(() =>
   staticMeasure.value === "nilai"
 );
 
-/**
- * Bridge chartDataL untuk useChartLogic
- */
 const chartDataLBridge = ref({
   labels: [],
   datasets: [],
@@ -352,6 +704,8 @@ const {
   shouldStackYearly,
   activeMonthlyMethod,
   getDatasetUnitLabel,
+  primaryDisplayUnit,
+  staticDisplayUnit: effectiveStaticDisplayUnit,
 });
 
 watch(
@@ -564,11 +918,65 @@ watch(
   }
 );
 
+watch(
+  [primaryMeasure, primaryBaseUnitLabel, primaryDataset],
+  ([measure, baseUnit, dataset]) => {
+    if (!dataset) return;
+
+    const available = getAvailableDisplayUnits(baseUnit);
+
+    if (measure !== "nilai" || !available.length) {
+      chartStore.setDisplayUnit(dataset.id, null);
+      return;
+    }
+
+    const id = String(dataset.id);
+    const currentDisplayUnit = chartStore.compareConfigs[id]?.displayUnit ?? null;
+
+    if (currentDisplayUnit && available.includes(currentDisplayUnit)) {
+      return;
+    }
+
+    chartStore.setDisplayUnit(dataset.id, baseUnit);
+  },
+  { immediate: true }
+);
+
+watch(
+  [staticMeasure, staticBaseUnitLabel, activeStaticDataset],
+  ([measure, baseUnit, dataset]) => {
+    if (!dataset) {
+      staticDisplayUnit.value = "";
+      return;
+    }
+
+    const available = getAvailableDisplayUnits(baseUnit);
+
+    if (measure !== "nilai" || available.length <= 1) {
+      staticDisplayUnit.value = "";
+      return;
+    }
+
+    if (staticDisplayUnit.value && available.includes(staticDisplayUnit.value)) {
+      return;
+    }
+
+    staticDisplayUnit.value = baseUnit;
+  },
+  { immediate: true }
+);
+
 function buildMonthlyQuarterlyMergeDatasets(leftSeries, staticDataset) {
   const quarterlyMeta = getSeriesMeta(staticDataset, "quarterly");
   const trimmedQuarterlyMeta = trimMetaByRange(quarterlyMeta, selectedRange.value);
-  const quarterPeriods = trimmedQuarterlyMeta.periods ?? [];
-  const quarterTotals = trimmedQuarterlyMeta.data ?? [];
+
+  const convertedQuarterlyMeta = getConvertedStaticMeta(
+    trimmedQuarterlyMeta,
+    staticMeasure.value
+  );
+
+  const quarterPeriods = convertedQuarterlyMeta.periods ?? [];
+  const quarterTotals = convertedQuarterlyMeta.data ?? [];
 
   if (!leftSeries.length || !quarterPeriods.length) {
     return { labels: [], datasets: [] };
@@ -587,8 +995,14 @@ function buildMonthlyQuarterlyMergeDatasets(leftSeries, staticDataset) {
   });
 
   leftSeries.forEach((seriesItem, seriesIdx) => {
-    const monthlyPeriods = seriesItem.meta.periods ?? [];
-    const monthlyValues = seriesItem.meta.data ?? [];
+    const displayMeta = getConvertedMetaForDataset(
+      seriesItem.dataset,
+      seriesItem.measure,
+      seriesItem.meta
+    );
+
+    const monthlyPeriods = displayMeta.periods ?? [];
+    const monthlyValues = displayMeta.data ?? [];
     const datasetId = String(seriesItem.dataset.id);
 
     const monthlySlotMap = {
@@ -667,7 +1081,7 @@ function buildMonthlyQuarterlyMergeDatasets(leftSeries, staticDataset) {
   });
 
   datasets.push({
-    label: `${getDatasetDisplayName(staticDataset)} - Total Triwulan`,
+    label: `${getStaticLegendLabelWithUnit(staticDataset, staticMeasure.value)} - Total Triwulan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "quarterly",
@@ -693,8 +1107,14 @@ function buildMonthlyQuarterlyMergeDatasets(leftSeries, staticDataset) {
 function buildMonthlyYearlyMergeDatasets(leftSeries, staticDataset) {
   const yearlyMeta = getSeriesMeta(staticDataset, "yearly");
   const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
-  const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
-  const yearTotals = trimmedYearlyMeta.data ?? [];
+
+  const convertedYearlyMeta = getConvertedStaticMeta(
+    trimmedYearlyMeta,
+    staticMeasure.value
+  );
+
+  const yearPeriods = (convertedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
+  const yearTotals = convertedYearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
     return { labels: [], datasets: [] };
@@ -712,8 +1132,14 @@ function buildMonthlyYearlyMergeDatasets(leftSeries, staticDataset) {
   });
 
   leftSeries.forEach((seriesItem, seriesIdx) => {
-    const monthlyPeriods = seriesItem.meta.periods ?? [];
-    const monthlyValues = seriesItem.meta.data ?? [];
+    const displayMeta = getConvertedMetaForDataset(
+      seriesItem.dataset,
+      seriesItem.measure,
+      seriesItem.meta
+    );
+
+    const monthlyPeriods = displayMeta.periods ?? [];
+    const monthlyValues = displayMeta.data ?? [];
     const datasetId = String(seriesItem.dataset.id);
 
     const monthlySlotMap = Object.fromEntries(
@@ -790,7 +1216,7 @@ function buildMonthlyYearlyMergeDatasets(leftSeries, staticDataset) {
   });
 
   datasets.push({
-    label: `${getDatasetDisplayName(staticDataset)} - Total Tahunan`,
+    label: `${getStaticLegendLabelWithUnit(staticDataset, staticMeasure.value)} - Total Tahunan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "yearly",
@@ -816,8 +1242,14 @@ function buildMonthlyYearlyMergeDatasets(leftSeries, staticDataset) {
 function buildQuarterlyYearlyMergeDatasets(leftSeries, yearlyDataset) {
   const yearlyMeta = getSeriesMeta(yearlyDataset, "yearly");
   const trimmedYearlyMeta = trimMetaByRange(yearlyMeta, selectedRange.value);
-  const yearPeriods = (trimmedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
-  const yearTotals = trimmedYearlyMeta.data ?? [];
+
+  const convertedYearlyMeta = getConvertedStaticMeta(
+    trimmedYearlyMeta,
+    staticMeasure.value
+  );
+
+  const yearPeriods = (convertedYearlyMeta.periods ?? []).map(normalizeYearLikePeriod);
+  const yearTotals = convertedYearlyMeta.data ?? [];
 
   if (!leftSeries.length || !yearPeriods.length) {
     return { labels: [], datasets: [] };
@@ -835,8 +1267,14 @@ function buildQuarterlyYearlyMergeDatasets(leftSeries, yearlyDataset) {
   });
 
   leftSeries.forEach((seriesItem, seriesIdx) => {
-    const quarterPeriods = seriesItem.meta.periods ?? [];
-    const quarterValues = seriesItem.meta.data ?? [];
+    const displayMeta = getConvertedMetaForDataset(
+      seriesItem.dataset,
+      seriesItem.measure,
+      seriesItem.meta
+    );
+
+    const quarterPeriods = displayMeta.periods ?? [];
+    const quarterValues = displayMeta.data ?? [];
     const datasetId = String(seriesItem.dataset.id);
 
     const quarterSlotMap = {
@@ -914,7 +1352,7 @@ function buildQuarterlyYearlyMergeDatasets(leftSeries, yearlyDataset) {
   });
 
   datasets.push({
-    label: `${getDatasetDisplayName(yearlyDataset)} - Total Tahunan`,
+    label: `${getStaticLegendLabelWithUnit(yearlyDataset, staticMeasure.value)} - Total Tahunan`,
     data: totalBars,
     tooltipPeriods: labels,
     sourceAggregation: "yearly",
@@ -973,8 +1411,14 @@ const chartDataL = computed(() => {
   }
 
   const dyn = activeLeftSeries.value.map((item) => {
+    const displayMeta = getConvertedMetaForDataset(
+      item.dataset,
+      item.measure,
+      item.meta
+    );
+
     const tooltipMeta = createDatasetTooltipMeta({
-      periods: item.meta.periods,
+      periods: displayMeta.periods,
       sourceAggregation: item.aggregation,
     });
 
@@ -984,7 +1428,7 @@ const chartDataL = computed(() => {
 
     return {
       label: getLegendLabelWithUnit(item.dataset, item.measure),
-      data: toPointData(item.meta),
+      data: toPointData(displayMeta),
       ...tooltipMeta,
       ...buildDatasetStyle({
         chartType: dynamicChartType.value,
@@ -999,16 +1443,20 @@ const chartDataL = computed(() => {
 
   if (isGabung.value && staticDs && staticPeriod.value) {
     const staticAggregation = staticPeriod.value === "yearly" ? "yearly" : "quarterly";
+    const convertedStaticMeta = getConvertedStaticMeta(
+      staticSeriesMeta.value,
+      staticMeasure.value
+    );
 
     const staticYAxisID = hasMixedMeasureKindsLeft.value
       ? (staticMeasure.value === "pertumbuhan" ? "y1" : "y")
       : "y";
 
     dyn.push({
-      label: getLegendLabelWithUnit(staticDs, staticMeasure.value),
-      data: toPointData(staticSeriesMeta.value),
+      label: getStaticLegendLabelWithUnit(staticDs, staticMeasure.value),
+      data: toPointData(convertedStaticMeta),
       ...createDatasetTooltipMeta({
-        periods: staticSeriesMeta.value.periods,
+        periods: convertedStaticMeta.periods,
         sourceAggregation: staticAggregation,
       }),
       ...buildDatasetStyle({
@@ -1040,31 +1488,38 @@ const rightAxisId = computed(() =>
   staticPeriod.value === "yearly" ? "xYearly" : "xQuarterly"
 );
 
-const chartDataR = computed(() => ({
-  labels: [],
-  datasets:
-    activeStaticDataset.value && staticPeriod.value
-      ? [
-          {
-            ...activeStaticDataset.value,
-            label: getLegendLabelWithUnit(activeStaticDataset.value, staticMeasure.value),
-            data: toPointData(staticSeriesMeta.value),
-            ...createDatasetTooltipMeta({
-              periods: staticSeriesMeta.value.periods,
-              sourceAggregation: staticPeriod.value === "yearly" ? "yearly" : "quarterly",
-            }),
-            ...buildDatasetStyle({
-              chartType: staticChartType.value,
-              lineColor: theme.value.primary || "#10B981",
-              fillColor: "rgba(16, 185, 129, 0.45)",
-              yAxisID: "y",
-              xAxisID: rightAxisId.value,
-              isStatic: true,
-            }),
-          },
-        ]
-      : [],
-}));
+const chartDataR = computed(() => {
+  const convertedStaticMeta = getConvertedStaticMeta(
+    staticSeriesMeta.value,
+    staticMeasure.value
+  );
+
+  return {
+    labels: [],
+    datasets:
+      activeStaticDataset.value && staticPeriod.value
+        ? [
+            {
+              ...activeStaticDataset.value,
+              label: getStaticLegendLabelWithUnit(activeStaticDataset.value, staticMeasure.value),
+              data: toPointData(convertedStaticMeta),
+              ...createDatasetTooltipMeta({
+                periods: convertedStaticMeta.periods,
+                sourceAggregation: staticPeriod.value === "yearly" ? "yearly" : "quarterly",
+              }),
+              ...buildDatasetStyle({
+                chartType: staticChartType.value,
+                lineColor: theme.value.primary || "#10B981",
+                fillColor: "rgba(16, 185, 129, 0.45)",
+                yAxisID: "y",
+                xAxisID: rightAxisId.value,
+                isStatic: true,
+              }),
+            },
+          ]
+        : [],
+  };
+});
 
 const valueLabelPlugin = {
   id: "valueLabelPlugin",
@@ -1095,12 +1550,18 @@ const valueLabelPlugin = {
 
         if (x === undefined || y === undefined) return;
 
+        const label = formatChartNumber(val, {
+          minFractionDigits: 0,
+          maxFractionDigits: 2,
+          fallback: "",
+        });
+
         ctx.save();
         ctx.font = "11px sans-serif";
         ctx.fillStyle = theme.value.text || "#E5E7EB";
         ctx.textAlign = "center";
         ctx.textBaseline = "bottom";
-        ctx.fillText(Number(val).toFixed(2), x, y - 8);
+        ctx.fillText(label, x, y - 8);
         ctx.restore();
       });
     });
@@ -1108,6 +1569,8 @@ const valueLabelPlugin = {
 };
 
 onMounted(async () => {
+  document.addEventListener("click", handleDocumentClick);
+
   await withPageBusy(async () => {
     await loadPdbComponentOptions();
     const result = await reloadBySelectedComponent();
@@ -1116,10 +1579,16 @@ onMounted(async () => {
   });
 });
 
+onBeforeUnmount(() => {
+  document.removeEventListener("click", handleDocumentClick);
+  clearPresetMessage();
+});
+
 watch(staticComponent, async (val, oldVal) => {
   if (!val) {
     staticPeriod.value = "";
     staticMethod.value = "";
+    staticDisplayUnit.value = "";
     resetAllDataState();
     return;
   }
@@ -1143,6 +1612,10 @@ watch(staticMeasure, async () => {
       staticMethod.value = "qtoq";
     } else if (staticPeriod.value === "yearly") {
       staticMethod.value = "annual";
+    }
+
+    if (staticMeasure.value !== "nilai") {
+      staticDisplayUnit.value = "";
     }
 
     await loadActiveStaticDataset();
@@ -1187,13 +1660,15 @@ const leftChartKey = computed(() => {
   const datasetId = primaryDataset.value?.id ?? "no-dataset";
   const seriesSignature = activeLeftSeries.value
     .map((item) => {
+      const displayUnit = getDisplayUnitForDataset(item.dataset, item.measure);
+
       return [
         item.dataset.id,
         item.aggregation,
         item.meta?.periods?.[0] ?? "",
         item.meta?.periods?.length ?? 0,
         item.measure ?? "",
-        item.unitLabel ?? "",
+        displayUnit ?? "",
       ].join(":");
     })
     .join(",");
@@ -1205,11 +1680,13 @@ const leftChartKey = computed(() => {
     primaryMeasure.value ?? "",
     primaryAggregation.value ?? "",
     primaryMethod.value ?? "",
+    primaryDisplayUnit.value ?? "",
     dynamicChartType.value ?? "",
     staticChartType.value ?? "",
     staticMeasure.value ?? "",
     staticPeriod.value ?? "",
     staticMethod.value ?? "",
+    effectiveStaticDisplayUnit.value ?? "",
     combineBarMode.value ?? "",
     selectedRange.value ?? "",
     useStackPeriodMerge.value ? "stack-period" : "normal",
@@ -1231,6 +1708,7 @@ const rightChartKey = computed(() => {
     staticPeriod.value ?? "",
     staticMethod.value ?? "",
     staticChartType.value ?? "",
+    effectiveStaticDisplayUnit.value ?? "",
     selectedRange.value ?? "",
     staticSeriesMeta.value?.periods?.[0] ?? "",
     staticSeriesMeta.value?.periods?.length ?? 0,
@@ -1369,6 +1847,209 @@ const rightChartKey = computed(() => {
               {{ item.label }}
             </button>
 
+            <div
+              ref="presetPopoverRef"
+              class="preset-popover-wrap"
+              :class="{ disabled: !canSaveCurrentIndicator }"
+            >
+              <button
+                type="button"
+                class="preset-trigger-btn"
+                :disabled="!canSaveCurrentIndicator || isPageBusy"
+                @click.stop="togglePresetPopover"
+              >
+                <span class="preset-trigger-label">Saved Views</span>
+                <span class="preset-trigger-meta">
+                  {{
+                    hasSavedSlot1
+                      ? getSlotCustomName(1)
+                      : hasSavedSlot2
+                        ? getSlotCustomName(2)
+                        : "Belum ada preset"
+                  }}
+                </span>
+              </button>
+
+              <Transition name="preset-pop">
+                <div
+                  v-if="isPresetPopoverOpen"
+                  class="preset-popover-panel"
+                  @click.stop
+                >
+                  <div class="preset-popover-header">
+                    <div>
+                      <div class="preset-popover-title">Saved Views</div>
+                      <div class="preset-popover-subtitle">Simpan kondisi dua chart</div>
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="presetActionMessage"
+                    class="preset-feedback"
+                    :class="presetActionType"
+                  >
+                    {{ presetActionMessage }}
+                  </div>
+
+                  <div class="preset-popover-list">
+                    <div class="preset-popover-item">
+                      <div class="preset-popover-item-top">
+                        <div class="preset-popover-item-meta">
+                          <span class="preset-popover-item-title">{{ getSlotCustomName(1) }}</span>
+                          <span
+                            v-if="slot1SavedAtText"
+                            class="preset-popover-item-time"
+                          >
+                            {{ slot1SavedAtText }}
+                          </span>
+                        </div>
+
+                        <span class="preset-slot-state" :class="{ filled: hasSavedSlot1 }">
+                          {{ getSlotStatusLabel(hasSavedSlot1) }}
+                        </span>
+                      </div>
+
+                      <div class="preset-name-editor">
+                        <input
+                          v-model="presetNameDrafts[1]"
+                          type="text"
+                          class="preset-name-input"
+                          placeholder="Nama preset 1"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @focus="openRenameDraft(1)"
+                        />
+                        <button
+                          v-if="hasSavedSlot1"
+                          type="button"
+                          class="preset-rename-btn"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @click="handleRenameSlot(1)"
+                        >
+                          Rename
+                        </button>
+                      </div>
+
+                      <div class="preset-slot-actions">
+                        <button
+                          v-if="!hasSavedSlot1"
+                          type="button"
+                          class="preset-btn save single"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @click="handleSaveSlot(1)"
+                        >
+                          Save
+                        </button>
+
+                        <template v-else>
+                          <button
+                            type="button"
+                            class="preset-btn load"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleLoadSlot(1)"
+                          >
+                            Load
+                          </button>
+                          <button
+                            type="button"
+                            class="preset-btn save"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleSaveSlot(1)"
+                          >
+                            Update
+                          </button>
+                          <button
+                            type="button"
+                            class="preset-btn clear"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleClearSlot(1)"
+                          >
+                            Clear
+                          </button>
+                        </template>
+                      </div>
+                    </div>
+
+                    <div class="preset-popover-item">
+                      <div class="preset-popover-item-top">
+                        <div class="preset-popover-item-meta">
+                          <span class="preset-popover-item-title">{{ getSlotCustomName(2) }}</span>
+                          <span
+                            v-if="slot2SavedAtText"
+                            class="preset-popover-item-time"
+                          >
+                            {{ slot2SavedAtText }}
+                          </span>
+                        </div>
+
+                        <span class="preset-slot-state" :class="{ filled: hasSavedSlot2 }">
+                          {{ getSlotStatusLabel(hasSavedSlot2) }}
+                        </span>
+                      </div>
+
+                      <div class="preset-name-editor">
+                        <input
+                          v-model="presetNameDrafts[2]"
+                          type="text"
+                          class="preset-name-input"
+                          placeholder="Nama preset 2"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @focus="openRenameDraft(2)"
+                        />
+                        <button
+                          v-if="hasSavedSlot2"
+                          type="button"
+                          class="preset-rename-btn"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @click="handleRenameSlot(2)"
+                        >
+                          Rename
+                        </button>
+                      </div>
+
+                      <div class="preset-slot-actions">
+                        <button
+                          v-if="!hasSavedSlot2"
+                          type="button"
+                          class="preset-btn save single"
+                          :disabled="!canSaveCurrentIndicator || isPageBusy"
+                          @click="handleSaveSlot(2)"
+                        >
+                          Save
+                        </button>
+
+                        <template v-else>
+                          <button
+                            type="button"
+                            class="preset-btn load"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleLoadSlot(2)"
+                          >
+                            Load
+                          </button>
+                          <button
+                            type="button"
+                            class="preset-btn save"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleSaveSlot(2)"
+                          >
+                            Update
+                          </button>
+                          <button
+                            type="button"
+                            class="preset-btn clear"
+                            :disabled="!canSaveCurrentIndicator || isPageBusy"
+                            @click="handleClearSlot(2)"
+                          >
+                            Clear
+                          </button>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </Transition>
+            </div>
+
             <Button
               :label="isGabung ? 'Pisahkan' : 'Gabungkan'"
               :outlined="!isGabung"
@@ -1384,6 +2065,10 @@ const rightChartKey = computed(() => {
           class="mb-2 text-[12px] text-amber-400"
         >
           {{ combineDisabledMessage }}
+        </p>
+
+        <p class="preset-status-text mb-3">
+          {{ saveStatusText }}
         </p>
 
         <div
@@ -1415,9 +2100,12 @@ const rightChartKey = computed(() => {
               :show-dynamic-chart-type-filter="showDynamicChartTypeFilter"
               :show-stack-bar-filter="showStackBarFilter"
               :show-combine-bar-mode-filter="showCombineBarModeFilter"
+              :show-primary-display-unit-filter="showPrimaryDisplayUnitFilter"
               :primary-measure="primaryMeasure"
               :primary-aggregation="primaryAggregation"
               :primary-method="primaryMethod"
+              :primary-display-unit="primaryDisplayUnit"
+              :primary-display-unit-options="primaryDisplayUnitOptions"
               :dynamic-chart-type="dynamicChartType"
               :combine-bar-mode="combineBarMode"
               :is-primary-monthly-disabled="isPrimaryMonthlyDisabled"
@@ -1431,6 +2119,7 @@ const rightChartKey = computed(() => {
               @primary-measure-change="onPrimaryMeasureChange"
               @primary-aggregation-change="onPrimaryAggregationChange"
               @primary-method-change="onPrimaryMethodChange"
+              @update:primary-display-unit="onPrimaryDisplayUnitChange"
               @update:dynamic-chart-type="dynamicChartType = $event"
               @update:combine-bar-mode="combineBarMode = $event"
             />
@@ -1458,12 +2147,15 @@ const rightChartKey = computed(() => {
                 :show-static-period-filter="showStaticPeriodFilter"
                 :show-static-method-filter="showStaticMethodFilter"
                 :show-static-chart-type-filter="showStaticChartTypeFilter"
+                :show-static-display-unit-filter="showStaticDisplayUnitFilter"
                 :static-component="staticComponent"
                 :active-mapped-source="activeMappedSource"
                 :static-measure="staticMeasure"
                 :static-period="staticPeriod"
                 :static-method="staticMethod"
                 :static-chart-type="staticChartType"
+                :static-display-unit="effectiveStaticDisplayUnit"
+                :static-display-unit-options="staticDisplayUnitOptions"
                 :is-static-quarterly-disabled="isStaticQuarterlyDisabled"
                 :is-static-yearly-disabled="isStaticYearlyDisabled"
                 :filter-options="FILTER_OPTIONS"
@@ -1475,6 +2167,7 @@ const rightChartKey = computed(() => {
                 @update:static-period="staticPeriod = $event"
                 @update:static-method="staticMethod = $event"
                 @update:static-chart-type="staticChartType = $event"
+                @update:static-display-unit="onStaticDisplayUnitChange"
               />
             </div>
           </Transition>
@@ -1520,7 +2213,10 @@ const rightChartKey = computed(() => {
   background: var(--p-content-background);
   color: var(--p-text-color);
   outline: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
 }
 
 .standalone-filter-control:hover {
@@ -1556,6 +2252,322 @@ const rightChartKey = computed(() => {
   border-color: transparent;
   background: linear-gradient(135deg, #2563eb, #14b8a6);
   box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
+}
+
+.preset-popover-wrap {
+  position: relative;
+}
+
+.preset-popover-wrap.disabled {
+  opacity: 0.76;
+}
+
+.preset-trigger-btn {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 156px;
+  height: 42px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--p-content-border-color) 88%, transparent);
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--p-content-background) 96%, white 4%),
+      color-mix(in srgb, var(--p-content-background) 92%, var(--p-primary-50) 8%)
+    );
+  color: var(--p-text-color);
+  text-align: left;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+  box-shadow:
+    0 8px 18px color-mix(in srgb, var(--p-primary-color, #3b82f6) 8%, transparent),
+    0 1px 0 rgba(255,255,255,0.45) inset;
+}
+
+.preset-trigger-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--p-primary-color) 28%, var(--p-content-border-color));
+}
+
+.preset-trigger-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.preset-trigger-label {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--p-primary-color);
+  line-height: 1.1;
+}
+
+.preset-trigger-meta {
+  font-size: 11px;
+  color: var(--p-text-muted-color);
+  line-height: 1.2;
+  margin-top: 2px;
+}
+
+.preset-popover-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 30;
+  width: 290px;
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--p-content-border-color) 88%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--p-content-background) 98%, white 2%),
+      color-mix(in srgb, var(--p-content-background) 94%, transparent)
+    );
+  box-shadow:
+    0 18px 40px rgba(15, 23, 42, 0.12),
+    0 1px 0 rgba(255,255,255,0.55) inset;
+  backdrop-filter: blur(12px);
+}
+
+.preset-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--p-content-border-color) 82%, transparent);
+}
+
+.preset-popover-title {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--p-text-color);
+}
+
+.preset-popover-subtitle {
+  font-size: 11px;
+  color: var(--p-text-muted-color);
+  margin-top: 2px;
+}
+
+.preset-feedback {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.preset-feedback.success {
+  color: #166534;
+  background: rgba(34, 197, 94, 0.10);
+  border-color: rgba(34, 197, 94, 0.18);
+}
+
+.preset-feedback.info {
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.10);
+  border-color: rgba(59, 130, 246, 0.18);
+}
+
+.preset-popover-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.preset-popover-item {
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--p-content-border-color) 86%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--p-content-background) 98%, white 2%),
+      color-mix(in srgb, var(--p-content-background) 94%, transparent)
+    );
+}
+
+.preset-popover-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.preset-popover-item-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preset-popover-item-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--p-text-color);
+}
+
+.preset-popover-item-time {
+  font-size: 10px;
+  color: var(--p-text-muted-color);
+  line-height: 1.2;
+}
+
+.preset-slot-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.16);
+}
+
+.preset-slot-state.filled {
+  color: #15803d;
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.16);
+}
+
+.preset-name-editor {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.preset-name-input {
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--p-content-border-color) 88%, transparent);
+  background: color-mix(in srgb, var(--p-content-background) 96%, white 4%);
+  color: var(--p-text-color);
+  font-size: 11px;
+  outline: none;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.preset-name-input:focus {
+  border-color: var(--p-primary-500);
+  box-shadow: 0 0 0 1px var(--p-primary-500);
+}
+
+.preset-rename-btn {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--p-content-border-color) 88%, transparent);
+  background: color-mix(in srgb, var(--p-content-background) 94%, var(--p-primary-50) 6%);
+  color: var(--p-primary-color);
+  font-size: 11px;
+  font-weight: 700;
+  transition: transform 0.18s ease, border-color 0.18s ease;
+}
+
+.preset-rename-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--p-primary-color) 28%, var(--p-content-border-color));
+}
+
+.preset-rename-btn:disabled,
+.preset-name-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.preset-slot-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.preset-btn {
+  flex: 1;
+  min-width: 70px;
+  height: 30px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  border: 1px solid transparent;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    color 0.18s ease;
+}
+
+.preset-btn.save {
+  color: #fff;
+  background: linear-gradient(135deg, #2563eb, #14b8a6);
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.18);
+}
+
+.preset-btn.save.single {
+  min-width: 100%;
+}
+
+.preset-btn.load {
+  color: var(--p-text-color);
+  background: color-mix(in srgb, var(--p-content-background) 96%, white 4%);
+  border-color: color-mix(in srgb, var(--p-content-border-color) 90%, transparent);
+}
+
+.preset-btn.clear {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.16);
+}
+
+.preset-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.preset-btn.load:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--p-primary-color) 28%, var(--p-content-border-color));
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+}
+
+.preset-btn.clear:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.28);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.08);
+}
+
+.preset-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.preset-pop-enter-active,
+.preset-pop-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  transform-origin: top right;
+}
+
+.preset-pop-enter-from,
+.preset-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
+}
+
+.preset-status-text {
+  font-size: 12px;
+  color: var(--p-text-muted-color);
+  padding-left: 2px;
 }
 
 .charts-shell {
@@ -2126,6 +3138,15 @@ const rightChartKey = computed(() => {
   .range-chip {
     min-width: 48px;
     padding: 0 12px;
+  }
+
+  .preset-trigger-btn {
+    min-width: 140px;
+  }
+
+  .preset-popover-panel {
+    right: 0;
+    width: min(290px, calc(100vw - 32px));
   }
 }
 

@@ -8,6 +8,16 @@ export const normalizeTextKey = (text = "") =>
     .replace(/[()]/g, "")
     .trim();
 
+const hasExplicitRupiahMarker = (text = "") => {
+  const lower = String(text ?? "").toLowerCase();
+
+  return (
+    lower.includes("rupiah") ||
+    /\brp\.?\b/.test(lower) ||
+    /\bidr\b/.test(lower)
+  );
+};
+
 export const normalizeUnitLabel = (unit, fallback = "Nilai") => {
   const text = String(unit ?? "").trim();
   if (!text) return fallback;
@@ -22,19 +32,216 @@ export const normalizeUnitLabel = (unit, fallback = "Nilai") => {
     return "Indeks";
   }
 
-  if (lower.includes("triliun")) {
+  /**
+   * Penting:
+   * Jangan langsung menganggap "ribu", "juta", "miliar", "triliun" sebagai rupiah.
+   * Contoh salah sebelumnya:
+   * - "Ribu Unit" ikut dianggap "Ribu Rupiah"
+   * - "Volume penjualan mobil" ikut punya filter Satuan Rupiah
+   *
+   * Sekarang hanya dianggap rupiah kalau unit aslinya memang menyebut Rupiah/Rp/IDR.
+   */
+  const isRupiah = hasExplicitRupiahMarker(lower);
+
+  if (isRupiah && (lower.includes("triliun") || lower.includes("triliyun"))) {
     return "Triliun Rupiah";
   }
 
-  if (lower.includes("miliar")) {
+  if (
+    isRupiah &&
+    (
+      lower.includes("miliar") ||
+      lower.includes("milyar") ||
+      lower.includes("miliyar")
+    )
+  ) {
     return "Miliar Rupiah";
   }
 
-  if (lower.includes("juta")) {
+  if (isRupiah && lower.includes("juta")) {
     return "Juta Rupiah";
   }
 
+  if (isRupiah && lower.includes("ribu")) {
+    return "Ribu Rupiah";
+  }
+
   return text;
+};
+
+export const normalizeRupiahUnit = (unit = "") => {
+  const normalized = normalizeUnitLabel(unit, "");
+
+  if (normalized === "Ribu Rupiah") return "Ribu Rupiah";
+  if (normalized === "Juta Rupiah") return "Juta Rupiah";
+  if (normalized === "Miliar Rupiah") return "Miliar Rupiah";
+  if (normalized === "Triliun Rupiah") return "Triliun Rupiah";
+
+  return "";
+};
+
+export const isRupiahUnit = (unit = "") => !!normalizeRupiahUnit(unit);
+
+export const getAvailableDisplayUnits = (unitLabel = "") => {
+  const normalized = normalizeUnitLabel(unitLabel, "");
+  const rupiahUnit = normalizeRupiahUnit(normalized);
+
+  if (!rupiahUnit) {
+    return normalized ? [normalized] : [];
+  }
+
+  const allRupiahUnits = [
+    "Ribu Rupiah",
+    "Juta Rupiah",
+    "Miliar Rupiah",
+    "Triliun Rupiah",
+  ];
+
+  return [
+    rupiahUnit,
+    ...allRupiahUnits.filter((unit) => unit !== rupiahUnit),
+  ];
+};
+
+export const getRupiahUnitFactor = (unit = "") => {
+  const normalized = normalizeRupiahUnit(unit);
+
+  const factorMap = {
+    "Ribu Rupiah": 1,
+    "Juta Rupiah": 1000,
+    "Miliar Rupiah": 1000000,
+    "Triliun Rupiah": 1000000000,
+  };
+
+  return factorMap[normalized] ?? null;
+};
+
+export const convertRupiahValue = (value, fromUnit = "", toUnit = "") => {
+  const num = Number(value);
+
+  if (!Number.isFinite(num)) {
+    return value;
+  }
+
+  const fromFactor = getRupiahUnitFactor(fromUnit);
+  const toFactor = getRupiahUnitFactor(toUnit);
+
+  if (!fromFactor || !toFactor) {
+    return value;
+  }
+
+  return num * (fromFactor / toFactor);
+};
+
+const getUnitScaleFactor = (fromUnit = "", toUnit = "") => {
+  const fromFactor = getRupiahUnitFactor(fromUnit);
+  const toFactor = getRupiahUnitFactor(toUnit);
+
+  if (!fromFactor || !toFactor) return 1;
+  return fromFactor / toFactor;
+};
+
+export const convertSeriesMetaByUnit = (meta = {}, fromUnit = "", toUnit = "") => {
+  const from = normalizeRupiahUnit(fromUnit);
+  const to = normalizeRupiahUnit(toUnit);
+
+  if (!from || !to) return meta;
+
+  const data = Array.isArray(meta?.data) ? meta.data : [];
+  const factor = getUnitScaleFactor(from, to);
+
+  return {
+    ...meta,
+    data: data.map((value) =>
+      typeof value === "number" && Number.isFinite(value)
+        ? value * factor
+        : value
+    ),
+    originalData: data,
+    originalUnit: from,
+    displayUnit: to,
+    isRupiahConverted: factor !== 1,
+  };
+};
+
+export const formatChartNumber = (
+  value,
+  {
+    minFractionDigits = 0,
+    maxFractionDigits = 2,
+    fallback = "",
+  } = {}
+) => {
+  const num = Number(value);
+
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+
+  const isInteger = Number.isInteger(num);
+
+  if (isInteger) {
+    const integerPart = new Intl.NumberFormat("id-ID", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(num);
+
+    return `${integerPart}.00`;
+  }
+
+  let formatted = new Intl.NumberFormat("id-ID", {
+    minimumFractionDigits: minFractionDigits,
+    maximumFractionDigits: maxFractionDigits,
+  }).format(num);
+
+  if (formatted.includes(",")) {
+    formatted = formatted
+      .replace(/0+$/g, "")
+      .replace(/,$/g, "");
+  }
+
+  return formatted;
+};
+
+export const formatChartNumberFixed = (
+  value,
+  digits = 2,
+  fallback = ""
+) => {
+  const num = Number(value);
+
+  if (!Number.isFinite(num)) {
+    return fallback;
+  }
+
+  const fixed = num.toFixed(digits);
+  const [integerPartRaw, fractionPart = ""] = fixed.split(".");
+
+  const integerPart = new Intl.NumberFormat("id-ID", {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(Number(integerPartRaw));
+
+  return fractionPart ? `${integerPart},${fractionPart}` : integerPart;
+};
+
+export const formatChartValueWithUnit = (
+  value,
+  unit = "",
+  {
+    minFractionDigits = 0,
+    maxFractionDigits = 2,
+    fallback = "",
+  } = {}
+) => {
+  const formatted = formatChartNumber(value, {
+    minFractionDigits,
+    maxFractionDigits,
+    fallback,
+  });
+
+  if (!formatted) return formatted;
+  return unit ? `${formatted} ${unit}` : formatted;
 };
 
 export const getDatasetDisplayName = (dataset) => {
@@ -229,41 +436,72 @@ export const getMonthLabelStep = (count) => {
 };
 
 export const getQuarterLabelStep = (count) => {
-  if (count <= 12) return 1;
-  if (count <= 20) return 2;
-  if (count <= 32) return 3;
-  if (count <= 48) return 4;
-  return 6;
+  if (count <= 4) return 1;
+  if (count <= 8) return 2;
+  if (count <= 12) return 3;
+  if (count <= 20) return 4;
+  if (count <= 32) return 6;
+  if (count <= 48) return 8;
+  return 10;
 };
 
-export const buildMonthlyTickLabel = (period, index, totalCount, mode = "default") => {
+export const buildMonthlyTickLabel = (
+  period,
+  index,
+  totalCount,
+  mode = "default"
+) => {
   const parsed = parsePeriod(period);
   if (parsed.type !== "monthly") return "";
 
   const step = getMonthLabelStep(totalCount);
-  if (index % step !== 0) return "";
+  const isFirst = index === 0;
+  const isLast = index === totalCount - 1;
+
+  if (!isFirst && !isLast && index % step !== 0) return "";
 
   const monthLabel = monthNames[parsed.month - 1] ?? "";
 
   if (mode === "ytod") {
-    if (parsed.month === 1) return [monthLabel, String(parsed.year)];
+    if (parsed.month === 1 || isLast) {
+      return [monthLabel, String(parsed.year)];
+    }
     return monthLabel;
   }
 
-  if (parsed.month === 1 && totalCount > 12) {
+  if ((parsed.month === 1 && totalCount > 12) || isLast) {
     return [monthLabel, String(parsed.year)];
   }
 
   return monthLabel;
 };
 
-export const buildQuarterlyTickLabel = (period, index, totalCount, forceShowAll = false) => {
+export const buildQuarterlyTickLabel = (
+  period,
+  index,
+  totalCount,
+  forceShowAll = false
+) => {
   const parsed = parsePeriod(period);
   if (parsed.type !== "quarterly") return "";
 
   if (!forceShowAll) {
     const step = getQuarterLabelStep(totalCount);
-    if (index % step !== 0) return "";
+    const isFirst = index === 0;
+    const isLast = index === totalCount - 1;
+    const isTooCloseToLast = totalCount - 1 - index < step;
+
+    if (isFirst || isLast) {
+      return `Q${parsed.quarter} ${parsed.year}`;
+    }
+
+    if (isTooCloseToLast) {
+      return "";
+    }
+
+    if (index % step !== 0) {
+      return "";
+    }
   }
 
   return `Q${parsed.quarter} ${parsed.year}`;
@@ -456,6 +694,12 @@ export const toPointData = (meta) =>
   meta.periods.map((period, index) => ({
     x: period,
     y: meta.data[index] ?? null,
+    originalY: Array.isArray(meta?.originalData)
+      ? meta.originalData[index] ?? null
+      : meta.data[index] ?? null,
+    originalUnit: meta?.originalUnit ?? "",
+    displayUnit: meta?.displayUnit ?? "",
+    isRupiahConverted: !!meta?.isRupiahConverted,
   }));
 
 export const aggregationToAxisId = (aggregation) => {

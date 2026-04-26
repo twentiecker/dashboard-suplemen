@@ -1,12 +1,14 @@
 import { defineStore } from "pinia";
 
 const MAX_DYNAMIC = 5;
+const MAX_SAVE_SLOT = 2;
 
 function createDefaultConfig() {
   return {
     measure: null,
     aggregation: null, // monthly | quarterly | yearly
     method: null, // mtom | yony | ytod | qtoq | ctoc | annual
+    displayUnit: null, // khusus tampilan nilai rupiah
   };
 }
 
@@ -27,7 +29,10 @@ const cloneConfig = (config = {}) => ({
   measure: config?.measure ?? null,
   aggregation: config?.aggregation ?? null,
   method: config?.method ?? null,
+  displayUnit: config?.displayUnit ?? null,
 });
+
+const deepClone = (value) => JSON.parse(JSON.stringify(value));
 
 const isFiniteNumber = (value) =>
   typeof value === "number" && Number.isFinite(value);
@@ -59,7 +64,6 @@ const hasAggregationData = (dataset, aggregation, measure = "nilai") => {
     return false;
   }
 
-  // pertumbuhan
   if (aggregation === "monthly") {
     return (
       hasValidSeriesData(dataset?.growth?.monthly?.mtom) ||
@@ -107,6 +111,7 @@ const buildDefaultConfigForDataset = (dataset, measure = "nilai") => {
     measure,
     aggregation,
     method: aggregation ? getDefaultMethodByAggregation(aggregation) : null,
+    displayUnit: null,
   };
 };
 
@@ -147,6 +152,13 @@ const adaptConfigToDataset = (dataset, sourceConfig = {}) => {
     measure,
     aggregation,
     method,
+
+    /**
+     * KHUSUS KONVERSI RUPIAH:
+     * displayUnit tidak boleh inherit dari indikator sebelumnya.
+     * Default displayUnit akan ditentukan oleh App.vue berdasarkan satuan asli data.
+     */
+    displayUnit: null,
   };
 };
 
@@ -155,6 +167,7 @@ export const useChartStore = defineStore("chart", {
     selectedDataset: [],
     compareConfigs: {},
     expandedFilterIds: [],
+    savedIndicatorStates: {},
   }),
 
   getters: {
@@ -168,6 +181,15 @@ export const useChartStore = defineStore("chart", {
     getCompareConfig: (state) => (dataset) => {
       const id = String(dataset?.id ?? "");
       return state.compareConfigs[id] ?? createDefaultConfig();
+    },
+    getSavedSlotsByDatasetId: (state) => (datasetId) => {
+      const id = String(datasetId ?? "");
+      return state.savedIndicatorStates[id] ?? {};
+    },
+    hasSavedSlot: (state) => (datasetId, slot) => {
+      const id = String(datasetId ?? "");
+      const slotKey = `slot${Number(slot)}`;
+      return !!state.savedIndicatorStates?.[id]?.[slotKey];
     },
   },
 
@@ -229,15 +251,15 @@ export const useChartStore = defineStore("chart", {
     },
 
     showOnly(dataset) {
-  this.ensureConfig(dataset);
+      this.ensureConfig(dataset);
 
-  const id = String(dataset.id);
-  const defaultConfig = buildDefaultConfigForDataset(dataset, "nilai");
+      const id = String(dataset.id);
+      const defaultConfig = buildDefaultConfigForDataset(dataset, "nilai");
 
-  this.selectedDataset = [dataset];
-  this.applyConfig(id, defaultConfig);
-  this.expandedFilterIds = [];
-},
+      this.selectedDataset = [dataset];
+      this.applyConfig(id, defaultConfig);
+      this.expandedFilterIds = [];
+    },
 
     addCompare(dataset) {
       this.ensureConfig(dataset);
@@ -255,6 +277,7 @@ export const useChartStore = defineStore("chart", {
       if (this.selectedDataset.length >= MAX_DYNAMIC) return;
 
       const primaryDataset = this.selectedDataset[0] ?? null;
+
       if (primaryDataset) {
         const primaryConfig = this.getCompareConfig(primaryDataset);
         const fallbackPrimaryConfig =
@@ -262,7 +285,11 @@ export const useChartStore = defineStore("chart", {
             ? primaryConfig
             : buildDefaultConfigForDataset(primaryDataset, "nilai");
 
-        const inheritedConfig = adaptConfigToDataset(dataset, fallbackPrimaryConfig);
+        const inheritedConfig = adaptConfigToDataset(
+          dataset,
+          fallbackPrimaryConfig
+        );
+
         this.applyConfig(dataset, inheritedConfig);
       } else {
         this.applyConfig(dataset, buildDefaultConfigForDataset(dataset, "nilai"));
@@ -293,39 +320,50 @@ export const useChartStore = defineStore("chart", {
       }
     },
 
-setMeasure(datasetId, measure) {
-  const id = String(datasetId);
-  this.ensureConfig(id);
+    setMeasure(datasetId, measure) {
+      const id = String(datasetId);
+      this.ensureConfig(id);
 
-  const dataset = this.selectedDataset.find((item) => String(item.id) === id);
-  const aggregation = getPreferredAggregation(dataset, measure);
+      const dataset = this.selectedDataset.find((item) => String(item.id) === id);
+      const aggregation = getPreferredAggregation(dataset, measure);
 
-  this.compareConfigs[id].measure = measure;
-  this.compareConfigs[id].aggregation = aggregation;
-  this.compareConfigs[id].method = aggregation
-    ? getDefaultMethodByAggregation(aggregation)
-    : null;
-},
+      this.compareConfigs[id].measure = measure;
+      this.compareConfigs[id].aggregation = aggregation;
+      this.compareConfigs[id].method = aggregation
+        ? getDefaultMethodByAggregation(aggregation)
+        : null;
 
-setAggregation(datasetId, aggregation) {
-  const id = String(datasetId);
-  this.ensureConfig(id);
+      if (measure !== "nilai") {
+        this.compareConfigs[id].displayUnit = null;
+      }
+    },
 
-  const dataset = this.selectedDataset.find((item) => String(item.id) === id);
-  const measure = this.compareConfigs[id]?.measure ?? "nilai";
-  const supported = getSupportedAggregations(dataset, measure);
+    setAggregation(datasetId, aggregation) {
+      const id = String(datasetId);
+      this.ensureConfig(id);
 
-  if (!supported?.[aggregation]) return;
+      const dataset = this.selectedDataset.find((item) => String(item.id) === id);
+      const measure = this.compareConfigs[id]?.measure ?? "nilai";
+      const supported = getSupportedAggregations(dataset, measure);
 
-  this.compareConfigs[id].aggregation = aggregation;
-  this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
-},
+      if (!supported?.[aggregation]) return;
+
+      this.compareConfigs[id].aggregation = aggregation;
+      this.compareConfigs[id].method = getDefaultMethodByAggregation(aggregation);
+    },
 
     setMethod(datasetId, method) {
       const id = String(datasetId);
       this.ensureConfig(id);
 
       this.compareConfigs[id].method = method;
+    },
+
+    setDisplayUnit(datasetId, displayUnit) {
+      const id = String(datasetId);
+      this.ensureConfig(id);
+
+      this.compareConfigs[id].displayUnit = displayUnit ?? null;
     },
 
     resetCompareConfig(datasetId) {
@@ -335,6 +373,103 @@ setAggregation(datasetId, aggregation) {
 
     clearAllCompareConfigs() {
       this.compareConfigs = {};
+    },
+
+    saveIndicatorState(datasetId, payload = {}) {
+      const id = String(datasetId ?? "");
+      const slotNumber = Number(payload?.slot);
+
+      if (!id) return false;
+      if (![1, 2].includes(slotNumber)) return false;
+      if (slotNumber > MAX_SAVE_SLOT) return false;
+
+      const slotKey = `slot${slotNumber}`;
+      const currentConfig = this.compareConfigs[id] ?? createDefaultConfig();
+      const existingSlot = this.savedIndicatorStates?.[id]?.[slotKey] ?? null;
+
+      if (!this.savedIndicatorStates[id]) {
+        this.savedIndicatorStates[id] = {};
+      }
+
+      this.savedIndicatorStates[id][slotKey] = deepClone({
+        savedAt: Date.now(),
+        customName:
+          String(payload?.customName ?? "").trim() ||
+          existingSlot?.customName ||
+          `Preset ${slotNumber}`,
+        dynamicConfig: cloneConfig(currentConfig),
+        uiState: {
+          selectedRange: payload?.uiState?.selectedRange ?? "8Y",
+          selectedProvince: payload?.uiState?.selectedProvince ?? "indonesia",
+          dynamicChartType: payload?.uiState?.dynamicChartType ?? "line",
+          combineBarMode: payload?.uiState?.combineBarMode ?? "standard",
+        },
+        staticState: {
+          staticComponent: payload?.staticState?.staticComponent ?? "",
+          staticMeasure: payload?.staticState?.staticMeasure ?? "pertumbuhan",
+          staticPeriod: payload?.staticState?.staticPeriod ?? "",
+          staticMethod: payload?.staticState?.staticMethod ?? "",
+          staticChartType: payload?.staticState?.staticChartType ?? "line",
+          staticDisplayUnit: payload?.staticState?.staticDisplayUnit ?? "",
+        },
+      });
+
+      return true;
+    },
+
+    loadIndicatorState(datasetId, slot) {
+      const id = String(datasetId ?? "");
+      const slotNumber = Number(slot);
+
+      if (!id) return null;
+      if (![1, 2].includes(slotNumber)) return null;
+
+      const slotKey = `slot${slotNumber}`;
+      const saved = this.savedIndicatorStates?.[id]?.[slotKey];
+
+      if (!saved) return null;
+
+      return deepClone(saved);
+    },
+
+    renameSavedIndicatorState(datasetId, slot, customName) {
+      const id = String(datasetId ?? "");
+      const slotNumber = Number(slot);
+
+      if (!id) return false;
+      if (![1, 2].includes(slotNumber)) return false;
+
+      const slotKey = `slot${slotNumber}`;
+      const saved = this.savedIndicatorStates?.[id]?.[slotKey];
+
+      if (!saved) return false;
+
+      const nextName = String(customName ?? "").trim() || `Preset ${slotNumber}`;
+      this.savedIndicatorStates[id][slotKey].customName = nextName;
+
+      return true;
+    },
+
+    clearSavedIndicatorState(datasetId, slot) {
+      const id = String(datasetId ?? "");
+      const slotNumber = Number(slot);
+
+      if (!id) return false;
+      if (![1, 2].includes(slotNumber)) return false;
+
+      const slotKey = `slot${slotNumber}`;
+
+      if (!this.savedIndicatorStates?.[id]?.[slotKey]) {
+        return false;
+      }
+
+      delete this.savedIndicatorStates[id][slotKey];
+
+      if (Object.keys(this.savedIndicatorStates[id]).length === 0) {
+        delete this.savedIndicatorStates[id];
+      }
+
+      return true;
     },
   },
 });

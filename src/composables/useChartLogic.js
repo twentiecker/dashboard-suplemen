@@ -17,6 +17,7 @@ import {
   formatYearTick,
   formatQuarterMergeTickLabel,
   formatYearMergeTickLabel,
+  formatChartNumber,
 } from "../utils/chartHelpers";
 
 export function useChartLogic({
@@ -38,7 +39,17 @@ export function useChartLogic({
   shouldStackYearly,
   activeMonthlyMethod,
   getDatasetUnitLabel,
+  primaryDisplayUnit,
+  staticDisplayUnit,
 }) {
+  const unwrapValue = (value) => {
+    if (value && typeof value === "object" && "value" in value) {
+      return value.value;
+    }
+
+    return value;
+  };
+
   const theme = computed(() => {
     const style = getComputedStyle(document.documentElement);
     return {
@@ -49,6 +60,62 @@ export function useChartLogic({
       panelBg: style.getPropertyValue("--p-content-background").trim(),
     };
   });
+
+  const extractUnitFromLabel = (label = "") => {
+    const text = String(label ?? "");
+    const match = text.match(/\(([^()]*)\)\s*$/);
+    return match?.[1]?.trim() ?? "";
+  };
+
+  const formatValueForTooltip = (value, unit = "") => {
+    const formattedValue = formatChartNumber(value, {
+      minFractionDigits: 0,
+      maxFractionDigits: 2,
+      fallback: "-",
+    });
+
+    if (!unit) return formattedValue;
+    return `${formattedValue} ${unit}`;
+  };
+
+  const isDifferentValue = (a, b) => {
+    const first = Number(a);
+    const second = Number(b);
+
+    if (!Number.isFinite(first) || !Number.isFinite(second)) return false;
+    return Math.abs(first - second) > Number.EPSILON;
+  };
+
+  const getAxisTitleWithUnit = ({
+    baseTitle = "NILAI",
+    unit = "",
+    fallbackTitle = "",
+  } = {}) => {
+    const title = fallbackTitle || baseTitle;
+
+    if (!unit) return title;
+    if (title.includes(unit)) return title;
+
+    return `${title} (${unit})`;
+  };
+
+  const getLeftAxisUnitFromDatasets = (axisId = "y") => {
+    const datasets = Array.isArray(chartDataL.value?.datasets)
+      ? chartDataL.value.datasets
+      : [];
+
+    const units = datasets
+      .filter((dataset) => (dataset?.yAxisID ?? "y") === axisId)
+      .map((dataset) => extractUnitFromLabel(dataset?.label))
+      .filter(Boolean);
+
+    const uniqueUnits = [...new Set(units)];
+
+    if (uniqueUnits.length === 1) return uniqueUnits[0];
+    if (uniqueUnits.length > 1) return uniqueUnits.join(" / ");
+
+    return "";
+  };
 
   const hasStaticNilaiQuarterly = computed(() => {
     const ds = activeStaticDataset.value;
@@ -168,24 +235,38 @@ export function useChartLogic({
     activeLeftSeries.value.some((item) => item.measure !== "pertumbuhan")
   );
 
-const hasMixedMeasureKindsLeft = computed(() => {
-  const kinds = new Set(
-    activeLeftSeries.value.map((item) =>
-      item.measure === "pertumbuhan" ? "pertumbuhan" : "nilai"
-    )
-  );
+  const hasMixedMeasureKindsLeft = computed(() => {
+    const kinds = new Set(
+      activeLeftSeries.value.map((item) =>
+        item.measure === "pertumbuhan" ? "pertumbuhan" : "nilai"
+      )
+    );
 
-  if (isGabung.value && activeStaticDataset.value && staticPeriod.value) {
-    kinds.add(staticMeasure.value === "pertumbuhan" ? "pertumbuhan" : "nilai");
-  }
+    if (isGabung.value && activeStaticDataset.value && staticPeriod.value) {
+      kinds.add(staticMeasure.value === "pertumbuhan" ? "pertumbuhan" : "nilai");
+    }
 
-  return kinds.has("nilai") && kinds.has("pertumbuhan");
-});
+    return kinds.has("nilai") && kinds.has("pertumbuhan");
+  });
 
   const leftPrimaryUnitTitle = computed(() => {
-    if (hasMixedMeasureKindsLeft.value) return "NILAI";
-    if (hasGrowthSeriesLeft.value && !hasValueSeriesLeft.value) return "PERTUMBUHAN (%)";
-    return "NILAI";
+    if (hasMixedMeasureKindsLeft.value) {
+      const valueUnit = getLeftAxisUnitFromDatasets("y") || unwrapValue(primaryDisplayUnit);
+      return getAxisTitleWithUnit({
+        baseTitle: "NILAI",
+        unit: valueUnit,
+      });
+    }
+
+    if (hasGrowthSeriesLeft.value && !hasValueSeriesLeft.value) {
+      return "PERTUMBUHAN (%)";
+    }
+
+    const valueUnit = getLeftAxisUnitFromDatasets("y") || unwrapValue(primaryDisplayUnit);
+    return getAxisTitleWithUnit({
+      baseTitle: "NILAI",
+      unit: valueUnit,
+    });
   });
 
   const leftSecondaryUnitTitle = computed(() => {
@@ -193,9 +274,20 @@ const hasMixedMeasureKindsLeft = computed(() => {
     return "";
   });
 
-  const staticAxisTitle = computed(() =>
-    getAxisTitleForMeasure(staticMeasure.value)
-  );
+  const staticAxisTitle = computed(() => {
+    if (staticMeasure.value === "pertumbuhan") {
+      return getAxisTitleForMeasure(staticMeasure.value);
+    }
+
+    const unit =
+      unwrapValue(staticDisplayUnit) ||
+      getDatasetUnitLabel(activeStaticDataset.value, staticMeasure.value);
+
+    return getAxisTitleWithUnit({
+      baseTitle: "NILAI",
+      unit,
+    });
+  });
 
   const activeDatasetOrderMap = computed(() => {
     const map = {};
@@ -280,10 +372,13 @@ const hasMixedMeasureKindsLeft = computed(() => {
   const buildChartOptions = (chartTypeRef, isRightChart = false) =>
     computed(() => {
       const axisVisibility = isRightChart ? rightAxisVisibility.value : leftAxisVisibility.value;
+
       const monthlyPeriods = isRightChart ? [] : leftMonthlyAxisPeriods.value;
+
       const quarterlyPeriods = isRightChart
         ? (staticPeriod.value === "quarterly" ? staticSeriesMeta.value.periods : [])
         : leftQuarterlyAxisPeriods.value;
+
       const yearlyPeriods = isRightChart
         ? (staticPeriod.value === "yearly" ? staticSeriesMeta.value.periods : [])
         : leftYearlyAxisPeriods.value;
@@ -331,19 +426,21 @@ const hasMixedMeasureKindsLeft = computed(() => {
               title(items) {
                 if (!items?.length) return "";
 
-                const uniquePeriods = [...new Set(
-                  items
-                    .map((item) => {
-                      const period = getTooltipPeriodForContext(item);
-                      const aggregation = getTooltipAggregationForContext(item);
-                      return formatTooltipPeriod(
-                        period,
-                        aggregation,
-                        primaryAggregation.value
-                      );
-                    })
-                    .filter(Boolean)
-                )];
+                const uniquePeriods = [
+                  ...new Set(
+                    items
+                      .map((item) => {
+                        const period = getTooltipPeriodForContext(item);
+                        const aggregation = getTooltipAggregationForContext(item);
+                        return formatTooltipPeriod(
+                          period,
+                          aggregation,
+                          primaryAggregation.value
+                        );
+                      })
+                      .filter(Boolean)
+                  ),
+                ];
 
                 if (uniquePeriods.length === 1) {
                   return uniquePeriods[0];
@@ -362,19 +459,29 @@ const hasMixedMeasureKindsLeft = computed(() => {
                   primaryAggregation.value
                 );
 
-                const formattedValue =
-                  value === null || value === undefined
-                    ? "-"
-                    : Number(value).toLocaleString("id-ID", {
-                        minimumFractionDigits: 0,
-                        maximumFractionDigits: 2,
-                      });
+                const labelUnit = extractUnitFromLabel(label);
+                const rawPoint = context.raw ?? {};
+                const displayUnit = rawPoint?.displayUnit || labelUnit;
+                const originalUnit = rawPoint?.originalUnit ?? "";
+                const originalY = rawPoint?.originalY;
+
+                const formattedCurrentValue = formatValueForTooltip(value, displayUnit);
+
+                const hasOriginalValue =
+                  originalUnit &&
+                  originalY !== null &&
+                  originalY !== undefined &&
+                  isDifferentValue(originalY, value);
+
+                const originalText = hasOriginalValue
+                  ? ` (asal: ${formatValueForTooltip(originalY, originalUnit)})`
+                  : "";
 
                 if (formattedPeriod) {
-                  return `${label} (${formattedPeriod}): ${formattedValue}`;
+                  return `${label} (${formattedPeriod}): ${formattedCurrentValue}${originalText}`;
                 }
 
-                return `${label}: ${formattedValue}`;
+                return `${label}: ${formattedCurrentValue}${originalText}`;
               },
             },
           },
@@ -392,6 +499,7 @@ const hasMixedMeasureKindsLeft = computed(() => {
               maxRotation: 0,
               minRotation: 0,
               padding: 10,
+              includeBounds: true,
               callback(value, index) {
                 const raw = this.getLabelForValue(value);
                 return buildMonthlyTickLabel(
@@ -402,36 +510,48 @@ const hasMixedMeasureKindsLeft = computed(() => {
                 );
               },
             },
-            grid: { color: theme.value.border },
-            title: { display: false },
-          },
-          xQuarterly: {
-            type: "category",
-            position: "bottom",
-            display: axisVisibility.quarterly,
-            offset: chartTypeRef.value === "bar",
-            stacked: shouldStackQuarterly.value,
-            labels: quarterlyPeriods,
-            ticks: {
-              color: theme.value.textSecondary,
-              maxRotation: 0,
-              minRotation: 0,
-              padding: 10,
-              callback(value, index) {
-                const raw = this.getLabelForValue(value);
-                return buildQuarterlyTickLabel(
-                  raw,
-                  index,
-                  quarterlyPeriods.length,
-                  isMixedMonthlyQuarterlyAxis.value || isRightChart
-                );
-              },
-            },
             grid: {
-              display: !axisVisibility.monthly,
               color: theme.value.border,
             },
+            title: {
+              display: false,
+            },
           },
+
+xQuarterly: {
+  type: "category",
+  position: "bottom",
+  display: axisVisibility.quarterly,
+  offset: chartTypeRef.value === "bar",
+  stacked: shouldStackQuarterly.value,
+  labels: quarterlyPeriods,
+  ticks: {
+    color: theme.value.textSecondary,
+    maxRotation: 0,
+    minRotation: 0,
+    padding: 10,
+
+    // Tick tetap diproses semua, tapi label tetap disaring oleh callback.
+    autoSkip: false,
+    includeBounds: true,
+
+    callback(value, index) {
+      const raw = this.getLabelForValue(value);
+
+      return buildQuarterlyTickLabel(
+        raw,
+        index,
+        quarterlyPeriods.length,
+        false
+      );
+    },
+  },
+  grid: {
+    display: !axisVisibility.monthly,
+    color: theme.value.border,
+  },
+},
+
           xYearly: {
             type: "category",
             position: "bottom",
@@ -444,6 +564,7 @@ const hasMixedMeasureKindsLeft = computed(() => {
               maxRotation: 0,
               minRotation: 0,
               padding: 10,
+              includeBounds: true,
               callback(value) {
                 const raw = this.getLabelForValue(value);
                 return formatYearTick(raw);
@@ -454,10 +575,14 @@ const hasMixedMeasureKindsLeft = computed(() => {
               color: theme.value.border,
             },
           },
+
           xQuarterlyMerge: {
             type: "category",
             position: "bottom",
-            display: !isRightChart && useStackPeriodMerge.value && staticPeriod.value === "quarterly",
+            display:
+              !isRightChart &&
+              useStackPeriodMerge.value &&
+              staticPeriod.value === "quarterly",
             offset: true,
             stacked: true,
             labels: chartDataL.value.labels ?? [],
@@ -466,17 +591,25 @@ const hasMixedMeasureKindsLeft = computed(() => {
               maxRotation: 0,
               minRotation: 0,
               padding: 10,
+              autoSkip: false,
+              includeBounds: true,
               callback(value) {
                 const raw = this.getLabelForValue(value);
                 return formatQuarterMergeTickLabel(raw);
               },
             },
-            grid: { color: theme.value.border },
+            grid: {
+              color: theme.value.border,
+            },
           },
+
           xYearlyMerge: {
             type: "category",
             position: "bottom",
-            display: !isRightChart && useStackPeriodMerge.value && staticPeriod.value === "yearly",
+            display:
+              !isRightChart &&
+              useStackPeriodMerge.value &&
+              staticPeriod.value === "yearly",
             offset: true,
             stacked: true,
             labels: chartDataL.value.labels ?? [],
@@ -485,32 +618,60 @@ const hasMixedMeasureKindsLeft = computed(() => {
               maxRotation: 0,
               minRotation: 0,
               padding: 10,
+              includeBounds: true,
               callback(value) {
                 const raw = this.getLabelForValue(value);
                 return formatYearMergeTickLabel(raw, primaryAggregation.value);
               },
             },
-            grid: { color: theme.value.border },
+            grid: {
+              color: theme.value.border,
+            },
           },
+
           y: {
             position: "left",
             beginAtZero: false,
             stacked: useStackPeriodMerge.value,
-            ticks: { color: theme.value.textSecondary },
-            grid: { color: theme.value.border },
+            ticks: {
+              color: theme.value.textSecondary,
+              callback: (value) =>
+                formatChartNumber(value, {
+                  minFractionDigits: 0,
+                  maxFractionDigits: 2,
+                  fallback: "",
+                }),
+            },
+            grid: {
+              color: theme.value.border,
+            },
             title: {
               display: true,
               color: theme.value.textSecondary,
               text: isRightChart ? staticAxisTitle.value : leftPrimaryUnitTitle.value,
             },
           },
+
           y1: {
             position: "right",
             beginAtZero: false,
-            stacked: useStackPeriodMerge.value || shouldStackQuarterly.value || shouldStackYearly.value,
+            stacked:
+              useStackPeriodMerge.value ||
+              shouldStackQuarterly.value ||
+              shouldStackYearly.value,
             display: !isRightChart && hasMixedMeasureKindsLeft.value,
-            ticks: { color: theme.value.textSecondary },
-            grid: { drawOnChartArea: false },
+            ticks: {
+              color: theme.value.textSecondary,
+              callback: (value) =>
+                formatChartNumber(value, {
+                  minFractionDigits: 0,
+                  maxFractionDigits: 2,
+                  fallback: "",
+                }),
+            },
+            grid: {
+              drawOnChartArea: false,
+            },
             title: {
               display: !isRightChart && hasMixedMeasureKindsLeft.value,
               color: theme.value.textSecondary,

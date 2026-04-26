@@ -7,6 +7,7 @@ defineProps({
   showStaticPeriodFilter: Boolean,
   showStaticMethodFilter: Boolean,
   showStaticChartTypeFilter: Boolean,
+  showStaticDisplayUnitFilter: Boolean,
 
   staticComponent: {
     type: String,
@@ -32,6 +33,14 @@ defineProps({
   staticChartType: {
     type: String,
     default: "line",
+  },
+  staticDisplayUnit: {
+    type: String,
+    default: "",
+  },
+  staticDisplayUnitOptions: {
+    type: Array,
+    default: () => [],
   },
 
   isStaticQuarterlyDisabled: Boolean,
@@ -65,6 +74,7 @@ const emit = defineEmits([
   "update:static-period",
   "update:static-method",
   "update:static-chart-type",
+  "update:static-display-unit",
 ]);
 
 const onStaticMeasureChange = (event) => {
@@ -81,6 +91,10 @@ const onStaticMethodChange = (event) => {
 
 const onStaticChartTypeChange = (event) => {
   emit("update:static-chart-type", event.target.value);
+};
+
+const onStaticDisplayUnitChange = (event) => {
+  emit("update:static-display-unit", event.target.value);
 };
 </script>
 
@@ -137,6 +151,25 @@ const onStaticChartTypeChange = (event) => {
             <option value="" disabled>Pilih metode</option>
             <option
               v-for="opt in filterOptions.staticQuarterlyMethods"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
+        </div>
+
+        <div v-if="showStaticDisplayUnitFilter">
+          <label class="theme-text-muted mb-1 block text-[12px]">Satuan Rupiah</label>
+          <select
+            class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
+            :value="staticDisplayUnit"
+            @change="onStaticDisplayUnitChange"
+            :disabled="isPageBusy"
+          >
+            <option value="" disabled>Pilih satuan</option>
+            <option
+              v-for="opt in staticDisplayUnitOptions"
               :key="opt.value"
               :value="opt.value"
             >

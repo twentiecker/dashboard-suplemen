@@ -9,6 +9,7 @@ defineProps({
   showDynamicChartTypeFilter: Boolean,
   showStackBarFilter: Boolean,
   showCombineBarModeFilter: Boolean,
+  showPrimaryDisplayUnitFilter: Boolean,
 
   primaryMeasure: {
     type: String,
@@ -21,6 +22,15 @@ defineProps({
   primaryMethod: {
     type: String,
     default: "",
+  },
+  primaryDisplayUnit: {
+    type: String,
+    default: "",
+  },
+
+  primaryDisplayUnitOptions: {
+    type: Array,
+    default: () => [],
   },
 
   dynamicChartType: {
@@ -63,6 +73,7 @@ const emit = defineEmits([
   "primary-measure-change",
   "primary-aggregation-change",
   "primary-method-change",
+  "update:primary-display-unit",
   "update:dynamic-chart-type",
   "update:combine-bar-mode",
 ]);
@@ -73,6 +84,10 @@ const onDynamicChartTypeChange = (event) => {
 
 const onCombineBarModeChange = (event) => {
   emit("update:combine-bar-mode", event.target.value);
+};
+
+const onPrimaryDisplayUnitChange = (event) => {
+  emit("update:primary-display-unit", event.target.value);
 };
 </script>
 
@@ -144,6 +159,25 @@ const onCombineBarModeChange = (event) => {
             <option value="" disabled>Pilih metode</option>
             <option
               v-for="opt in filterOptions.quarterlyMethods"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </option>
+          </select>
+        </div>
+
+        <div v-if="showPrimaryDisplayUnitFilter">
+          <label class="theme-text-muted mb-1 block text-[12px]">Satuan Rupiah</label>
+          <select
+            class="theme-select w-full rounded-md px-2 py-2 text-[13px]"
+            :value="primaryDisplayUnit ?? ''"
+            @change="onPrimaryDisplayUnitChange"
+            :disabled="isPageBusy"
+          >
+            <option value="" disabled>Pilih satuan</option>
+            <option
+              v-for="opt in primaryDisplayUnitOptions"
               :key="opt.value"
               :value="opt.value"
             >
